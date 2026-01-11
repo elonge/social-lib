@@ -1,6 +1,6 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, FunctionCallingMode } from '@google/generative-ai';
 
-const GEMINI_MODEL = 'gemini-3-pro-preview'; 
+const GEMINI_MODEL = 'gemini-1.5-flash'; 
 
 // --- Tool Adapter ---
 
@@ -46,9 +46,7 @@ export async function runGeminiAgent<T>(
   const adaptedTools = tools.map(adaptTool);
   const toolMap = new Map(adaptedTools.map(t => [t.declaration.name, t.execute]));
 
-  // 2. Add Final Answer Tool (if schema provided, otherwise rely on tools returning data?)
-  // The reference passes `finalAnswerSchema` to create a `submit_final_answer` tool.
-  
+  // 2. Add Final Answer Tool
   let allToolDeclarations = [...adaptedTools.map(t => t.declaration)];
   
   if (outputSchema) {
@@ -62,7 +60,13 @@ export async function runGeminiAgent<T>(
 
   // 3. Start Chat
   const chat = model.startChat({
-    tools: [{ functionDeclarations: allToolDeclarations }]
+    tools: [{ functionDeclarations: allToolDeclarations }],
+    toolConfig: outputSchema ? {
+      functionCallingConfig: {
+        mode: FunctionCallingMode.ANY,
+        allowedFunctionNames: [outputToolName, ...adaptedTools.map(t => t.declaration.name)]
+      }
+    } : undefined
   });
 
   let response = await chat.sendMessage(userMessage);
@@ -110,12 +114,14 @@ export async function runGeminiAgent<T>(
       const text = response.response.text();
       console.log(`🤖 [Gemini] Says: ${text}`);
       
+      // If we are forced to use tools (Mode.ANY), the model SHOULD have called a tool.
+      // If it returns text instead, it might be an error or request for clarification.
+      // But we can try to nudge it again if we haven't got a result.
       if (!result && outputSchema) {
+         // Force it again? Or just break?
+         // With Mode.ANY, it *should* call a tool. If it didn't, maybe it refused?
+         // We can try sending a reminder.
          response = await chat.sendMessage(`Please submit the final answer using the ${outputToolName} tool.`);
-      } else if (!result && !outputSchema) {
-         // If no explicit output tool, maybe the text IS the result? 
-         // But for this pattern, we usually want structured output.
-         break;
       } else {
           break;
       }
