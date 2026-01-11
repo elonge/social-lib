@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Edit2, Trash2, Plus, Sparkles, Loader2, RefreshCw, AlertCircle, HelpCircle } from "lucide-react";
 import { Book } from "@/lib/types";
@@ -20,9 +20,13 @@ export default function VerifyPage() {
   const [libraryBooks, setLibraryBooks] = useState<Book[]>([]);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const router = useRouter();
+  const processingRef = useRef(false);
 
   useEffect(() => {
     const processImage = async () => {
+      if (processingRef.current) return;
+      processingRef.current = true;
+
       try {
         const savedImage = await get("captured_image");
         
@@ -44,11 +48,20 @@ export default function VerifyPage() {
         setProgressStep(2);
         const detectedBooks = await identifyBooksFromImage(savedImage);
         
+        // Filter out duplicates immediately
+        const newBooks = detectedBooks.filter(book => {
+            const isDup = existingLibrary.some(libBook => 
+                libBook.title.toLowerCase().trim() === book.title.toLowerCase().trim() && 
+                libBook.author.toLowerCase().trim() === book.author.toLowerCase().trim()
+            );
+            return !isDup;
+        });
+
         // Step 3: Fetching Books information (metadata/covers already happening inside identifyBooksFromImage, but we mark it here)
         setProgressStep(3);
         await new Promise(resolve => setTimeout(resolve, 400));
         
-        setBooks(detectedBooks);
+        setBooks(newBooks);
       } catch (error) {
         console.error("Failed to process image", error);
       } finally {
@@ -147,17 +160,19 @@ export default function VerifyPage() {
     );
   }
 
+  // ... (keeping other imports and state)
+
+  // ...
+
   const highConfidenceBooks = books.filter(b => !b.isUnidentified && b.confidence === 'High');
   const reviewNeededBooks = books.filter(b => !b.isUnidentified && b.confidence !== 'High');
   const unidentifiedBooks = books.filter(b => b.isUnidentified);
 
-  const renderBookRow = (book: Book) => {
-    const duplicate = isDuplicate(book);
-    return (
-      <div key={book.id} className={cn(
+  // Helper component for rendering rows to ensure stability and avoid re-creation
+  const BookRow = ({ book }: { book: Book }) => (
+      <div className={cn(
         "bg-white p-5 rounded-3xl border shadow-sm flex items-center gap-4 group transition-colors",
-        book.isUnidentified ? "border-amber-200 bg-amber-50" : "border-zinc-100",
-        duplicate && "border-blue-200 bg-blue-50"
+        book.isUnidentified ? "border-amber-200 bg-amber-50" : "border-zinc-100"
       )}>
         <div className="relative w-12 h-16 bg-zinc-100 rounded-lg flex items-center justify-center text-zinc-400 overflow-hidden shrink-0 group/cover">
           {book.coverImage ? (
@@ -183,12 +198,6 @@ export default function VerifyPage() {
               <span className="px-2 py-0.5 bg-amber-200 text-amber-800 text-[10px] uppercase font-bold tracking-wider rounded-full flex items-center gap-1">
                 <HelpCircle className="w-3 h-3" />
                 Unidentified
-              </span>
-            )}
-            {duplicate && (
-              <span className="px-2 py-0.5 bg-blue-200 text-blue-800 text-[10px] uppercase font-bold tracking-wider rounded-full flex items-center gap-1">
-                <AlertCircle className="w-3 h-3" />
-                Duplicate
               </span>
             )}
             {!book.isUnidentified && book.confidence !== 'High' && (
@@ -217,8 +226,7 @@ export default function VerifyPage() {
           <Trash2 className="w-5 h-5" />
         </button>
       </div>
-    );
-  };
+  );
 
   return (
     <div className="min-h-screen bg-zinc-50 p-6 pb-32">
@@ -241,7 +249,7 @@ export default function VerifyPage() {
                 <section>
                     <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider mb-3">High Confidence</h2>
                     <div className="space-y-3">
-                        {highConfidenceBooks.map(renderBookRow)}
+                        {highConfidenceBooks.map(book => <BookRow key={book.id} book={book} />)}
                     </div>
                 </section>
             )}
@@ -250,7 +258,7 @@ export default function VerifyPage() {
                 <section>
                     <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider mb-3">Review Needed</h2>
                     <div className="space-y-3">
-                        {reviewNeededBooks.map(renderBookRow)}
+                        {reviewNeededBooks.map(book => <BookRow key={book.id} book={book} />)}
                     </div>
                 </section>
             )}
@@ -259,7 +267,7 @@ export default function VerifyPage() {
                 <section>
                     <h2 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider mb-3">Unidentified Spines</h2>
                     <div className="space-y-3">
-                        {unidentifiedBooks.map(renderBookRow)}
+                        {unidentifiedBooks.map(book => <BookRow key={book.id} book={book} />)}
                     </div>
                 </section>
             )}
