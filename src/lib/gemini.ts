@@ -1,7 +1,6 @@
 import { SchemaType } from "@google/generative-ai";
 import { Book } from "./types";
 import { runGeminiAgent } from "./agent";
-import { createFindCoverImageTool } from "./tools";
 
 // Define the output schema for the final answer tool
 
@@ -27,7 +26,20 @@ export async function findBookCover(title: string, author: string, language?: st
 
   return { url: null, source: null };
 }
-const BookSchemaJSON = {
+
+const OCRSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    texts: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "List of raw text strings found on the book spines."
+    }
+  },
+  required: ['texts']
+};
+
+const MetadataSchema = {
   type: SchemaType.OBJECT,
   properties: {
     title: { type: SchemaType.STRING },
@@ -35,48 +47,32 @@ const BookSchemaJSON = {
     language: { type: SchemaType.STRING, nullable: true, description: "ISO 2 letter language code (e.g. en, fr, es)" },
     confidence: { type: SchemaType.STRING, nullable: true, description: "Confidence level: High, Medium, Low" }
   },
-  required: ['title', 'author', 'language', 'confidence']
+  required: ['title', 'author', 'confidence']
 };
 
-const FinalAnswerSchemaJSON = {
-  type: SchemaType.OBJECT,
-  properties: {
-    books: {
-      type: SchemaType.ARRAY,
-      items: BookSchemaJSON
-    }
-  },
-  required: ['books']
-};
+const OCR_PROMPT = `
+You are an advanced OCR (Optical Character Recognition) engine specializing in reading book spines.
+Your task is to identify and transcribe the text from every distinct book spine visible in the image.
 
-/*
-3. For EACH identified book, you MUST use the 'find_cover_image' tool to search for a real cover image URL. 
-   - Pass the extracted title and author to the tool.
-   - Use the URL returned by the tool.
-4. Once you have the details and cover images for all books, use the 'submit_final_book_list' tool to return the result.
-*/
-const SYSTEM_PROMPT = `
-You are an expert digital librarian.
-Your goal is to extract book data *only* from clearly visible text in the image.
+Rules:
+1. Return a list of strings. Each string represents the full text found on a single spine.
+2. Be purely technical. Do not attempt to correct spelling or guess missing words.
+3. If a spine is clearly visible but the text is illegible or too blurry to read, include the string "UNIDENTIFIED_SPINE" in the list.
+4. Do not include text from non-book objects.
+`;
 
-**Strict Anti-Hallucination Rules:**
-1. **DO NOT GUESS.** If a spine is blurry, shadowed, or the text is illegible, mark it as unidentified.
-2. **VERBATIM MATCHING:** You must be able to read the actual letters on the book. Do not infer a book based on color or logo alone.
+const METADATA_PROMPT = `
+You are a digital librarian expert.
+Your task is to analyze a raw text string extracted from a book spine and identify the book's metadata.
 
-**Process:**
-1. Scan the image for text that is clearly legible.
-2. Extract the Title and Author exactly as they appear.
-3. Determine the language (2-letter ISO code).
-4. If a spine is visible but the text is unreadable, create an entry with title "Unidentified Spine" and author "Unknown".
-
-**Output Format (JSON):**
-Return a JSON array of objects.
-{
-  "title": "Exact text found on spine",
-  "author": "Exact text found on spine",
-  "confidence": "High/Medium/Low", 
-  "language": "en"
-}
+Rules:
+1. Identify the Title and Author.
+2. Determine the Language (2-letter ISO code).
+3. Assign a Confidence level (High, Medium, Low).
+   - High: Title and Author are clear and match known books.
+   - Medium: Partial match or some ambiguity.
+   - Low: Text is fragmentary or does not look like a book title.
+4. If the text does not contain enough information to identify a book (e.g. just a logo or single word like "The"), set Title to "Unknown", Author to "Unknown", and Confidence to "Low".
 `;
 
 export async function identifyBooksFromImage(base64Image: string): Promise<Book[]> {
@@ -89,58 +85,85 @@ export async function identifyBooksFromImage(base64Image: string): Promise<Book[
   // Remove data URL prefix if present
   const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, "");
 
-  const userMessage = [
-    {
-      inlineData: {
-        data: base64Data,
-        mimeType: "image/jpeg",
-      },
-    },
-    { text: "Please identify the books in this image and find their covers." }
-  ];
-
-  const tools = [
-    // createFindCoverImageTool()
-  ];
-
   try {
-    const result = await runGeminiAgent<{ books: any[] }>(
+    // 1. OCR Step
+    console.log("Starting OCR Step...");
+    const ocrResult = await runGeminiAgent<{ texts: string[] }>(
       apiKey,
-      SYSTEM_PROMPT,
+      OCR_PROMPT,
       [],
-      userMessage,
-      "submit_final_book_list",
-      FinalAnswerSchemaJSON
+      [
+        { inlineData: { data: base64Data, mimeType: "image/jpeg" } },
+        { text: "Extract all text from the book spines in this image." }
+      ],
+      "submit_ocr_results",
+      OCRSchema
     );
 
-    if (result && result.books) {
-      const booksWithCovers = await Promise.all(
-        result.books.map(async (b) => {
-          console.log("Identified book:", b.title, "by", b.author, "lang:", b.language);
-          
-          const isUnidentified = b.title.toLowerCase().includes("unidentified spine");
-          let coverUrl = undefined;
+    if (!ocrResult || !ocrResult.texts) {
+      console.warn("OCR returned no results");
+      return [];
+    }
+    console.log(`OCR found ${ocrResult.texts.length} spines.`);
 
-          if (!isUnidentified) {
-             const cover = await findBookCover(b.title, b.author, b.language);
+    // 2. Metadata Step (Parallel)
+    const booksPromises = ocrResult.texts.map(async (text) => {
+      if (text.trim() === "UNIDENTIFIED_SPINE" || text.includes("UNIDENTIFIED_SPINE")) {
+        return {
+          id: Math.random().toString(36).substring(2, 11),
+          title: "Unidentified Spine",
+          author: "Unknown",
+          isUnidentified: true,
+          confidence: "Low"
+        } as Book;
+      }
+
+      try {
+        const metadata = await runGeminiAgent<{ title: string, author: string, language?: string, confidence?: string }>(
+          apiKey,
+          METADATA_PROMPT,
+          [],
+          `Analyze this book spine text: "${text}"`,
+          "submit_book_metadata",
+          MetadataSchema
+        );
+
+        if (metadata) {
+          let coverUrl = undefined;
+          // Only fetch cover if we have a valid title
+          if (metadata.title && metadata.title !== "Unknown" && metadata.confidence !== "Low") {
+             const cover = await findBookCover(metadata.title, metadata.author, metadata.language);
              coverUrl = cover.url || undefined;
           }
-          
+
+          // If confidence is Low, we might want to flag it as Review Needed or Unidentified?
+          // For now, we trust the agent's output. If title is "Unknown", user will see it.
+
           return {
             id: Math.random().toString(36).substring(2, 11),
-            title: b.title,
-            author: b.author,
-            language: b.language,
-            coverImage: coverUrl,
-            isUnidentified,
-            confidence: b.confidence
-          };
-        })
-      );
-      return booksWithCovers;
-    }
+            title: metadata.title || "Unknown Title",
+            author: metadata.author || "Unknown Author",
+            language: metadata.language,
+            confidence: metadata.confidence || "Low",
+            coverImage: coverUrl
+          } as Book;
+        }
+      } catch (e) {
+        console.error("Metadata extraction failed for text:", text, e);
+      }
+      
+      // Fallback
+      return {
+        id: Math.random().toString(36).substring(2, 11),
+        title: text.substring(0, 50),
+        author: "Unknown",
+        confidence: "Low"
+      } as Book;
+    });
 
-    return [];
+    const books = await Promise.all(booksPromises);
+    return books;
+
   } catch (error) {
     console.error("Agent workflow failed:", error);
     return [];
