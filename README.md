@@ -20,6 +20,32 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Deploy to GCP (Cloud Run)
+
+Use the provided script in `server/deploy_gcp.sh`. It deploys the API to Cloud Run and sets `GOOGLE_API_KEY`.
+
+Prereqs:
+- `gcloud` installed and authenticated
+- `GOOGLE_API_KEY` available in an env file or exported in your shell
+
+Run from repo root:
+
+```bash
+./server/deploy_gcp.sh
+```
+
+If your key is in a specific env file:
+
+```bash
+ENV_FILE=.env.local ./server/deploy_gcp.sh
+```
+
+Optional overrides:
+
+```bash
+PROJECT_ID=my-gcp-project REGION=us-central1 SERVICE_NAME=book-extractor-api ./server/deploy_gcp.sh
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
