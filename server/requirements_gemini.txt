@@ -1,0 +1,6 @@
+# Requirements for Gemini Book Extractor
+
+# Core dependencies
+google-genai
+Pillow
+opencv-python

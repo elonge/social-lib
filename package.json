@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google/genai": "^1.35.0",
     "@google/generative-ai": "^0.24.1",
     "@openai/agents": "^0.3.7",
     "clsx": "^2.1.1",

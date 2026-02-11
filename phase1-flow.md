@@ -1,3 +1,52 @@
+Updated user flows
+A. New user (no account)
+
+User lands on the landing page.
+
+Primary CTA: “Scan your bookshelf” (or equivalent).
+
+User uploads a photo of their bookshelf.
+
+System analyzes the image and presents a Staged List, grouped into:
+
+High Confidence
+
+Review Needed
+
+Unidentified Spines
+
+User reviews and optionally edits the staged results:
+
+Confirms obvious matches
+
+Fixes uncertain ones
+
+Tags or ignores unidentified books
+
+CTA: “Save your library” / “Create your library”
+
+User is prompted to sign up to save or share.
+
+After signup, the staged list is committed as their first library.
+
+Key idea: the user experiences the value and the honesty of the system before being asked to register.
+
+B. Existing user
+
+User signs in and sees their Library (saved books only).
+
+From the library page, they can:
+
+Add books manually
+
+Upload a new bookshelf photo
+
+Uploading a photo triggers the same Staged List flow:
+
+High Confidence
+
+Review Needed
+
 Unidentified Spines
 
 The system automatically:
