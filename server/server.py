@@ -1,10 +1,20 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from book_extractor import process_image_bytes
 from book_enricher import BookEnricher
 
 app = FastAPI(title="Book spine extractor API")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class CompleteUploadRequest(BaseModel):
     results: List[Dict[str, Any]]
