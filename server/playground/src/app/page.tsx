@@ -102,6 +102,7 @@ export default function Home() {
       });
 
       const data = await response.json();
+      console.log('Complete upload response:', data);
       setFinalResult({
         books: data.books,
         stats: data.enrichment_stats
