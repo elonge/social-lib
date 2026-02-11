@@ -34,9 +34,9 @@ class BookEnricher:
             diagnostics["duration_seconds"] = time.time() - start_time
             return book_data, diagnostics
 
-        # 1. Try Google Books and Open Library
-        gb_res = self._fetch_google_books_raw(title, author)
+        # 1. Try Open Library first, then Google Books
         ol_res = self._fetch_open_library_raw(title, author)
+        gb_res = self._fetch_google_books_raw(title, author)
         
         diagnostics["google_books_success"] = gb_res is not None
         diagnostics["open_library_success"] = ol_res is not None
@@ -51,8 +51,8 @@ class BookEnricher:
                 title = corrected.get("title", title)
                 author = corrected.get("author", author)
                 
-                gb_res = self._fetch_google_books_raw(title, author)
                 ol_res = self._fetch_open_library_raw(title, author)
+                gb_res = self._fetch_google_books_raw(title, author)
                 
                 diagnostics["google_books_success"] = diagnostics["google_books_success"] or (gb_res is not None)
                 diagnostics["open_library_success"] = diagnostics["open_library_success"] or (ol_res is not None)
@@ -116,14 +116,16 @@ class BookEnricher:
         if not gb_data and not ol_data:
             return None
         combined = {}
-        source_data = gb_data or ol_data
+        source_data = ol_data or gb_data
         combined.update(source_data)
         if gb_data and ol_data:
-            combined["publisher"] = gb_data.get("publisher") or ol_data.get("publisher")
-            combined["year"] = gb_data.get("year") or ol_data.get("year")
-            combined["author"] = gb_data.get("author") or ol_data.get("author")
-            combined["language"] = gb_data.get("language") or ol_data.get("language")
-            combined["cover_link"] = gb_data.get("cover_link") or ol_data.get("cover_link")
+            combined["publisher"] = ol_data.get("publisher") or gb_data.get("publisher")
+            combined["year"] = ol_data.get("year") or gb_data.get("year")
+            combined["author"] = ol_data.get("author") or gb_data.get("author")
+            combined["language"] = ol_data.get("language") or gb_data.get("language")
+            combined["cover_link"] = ol_data.get("cover_link") or gb_data.get("cover_link")
+        if combined.get("cover_link"):
+            combined["cover_link"] = self._normalize_cover_link(combined.get("cover_link"))
         return combined
 
     def _fetch_google_books_raw(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -152,7 +154,7 @@ class BookEnricher:
                         "year": volume_info.get("publishedDate", "")[:4],
                         "language": volume_info.get("language"),
                         "description": volume_info.get("description"),
-                        "cover_link": volume_info.get("imageLinks", {}).get("thumbnail")
+                        "cover_link": self._normalize_cover_link(volume_info.get("imageLinks", {}).get("thumbnail"))
                     }
         except Exception as e:
             print(f"Error fetching from Google Books: {e}")
@@ -229,3 +231,11 @@ JSON Format:
         except Exception as e:
             print(f"Error in Gemini fuzzy correction: {e}")
         return None
+
+    def _normalize_cover_link(self, link: Optional[str]) -> Optional[str]:
+        if not link:
+            return None
+        link = link.strip()
+        if link.startswith("http://"):
+            return "https://" + link[len("http://"):]
+        return link

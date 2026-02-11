@@ -166,9 +166,15 @@ struct ResultsView: View {
         NavigationView {
             List(books) { book in
                 HStack(spacing: 15) {
-                    Image(systemName: "book.closed.fill")
-                        .foregroundColor(.blue)
-                        .font(.title2)
+                    if let coverLink = book.coverLink, let coverURL = URL(string: coverLink) {
+                        CoverImageView(url: coverURL)
+                            .frame(width: 48, height: 72)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    } else {
+                        Image(systemName: "book.closed.fill")
+                            .foregroundColor(.blue)
+                            .font(.title2)
+                    }
                     
                     VStack(alignment: .leading, spacing: 4) {
                         Text(book.title ?? "Unknown Title")
@@ -194,6 +200,134 @@ struct ResultsView: View {
                 }
             }
         }
+    }
+}
+
+final class CoverImageLoader: ObservableObject {
+    @Published var image: UIImage?
+    @Published var didFail = false
+    
+    private static let downloadQueue = DispatchQueue(label: "cover-image-download", qos: .utility)
+    private static let semaphore = DispatchSemaphore(value: 1)
+    
+    private let url: URL
+    private var isLoading = false
+    private var attempt = 0
+    private let maxRetries = 4
+    private let baseDelay: TimeInterval = 1.5
+    
+    init(url: URL) {
+        self.url = url
+    }
+    
+    func load() {
+        guard !isLoading else { return }
+        isLoading = true
+        CoverImageLoader.downloadQueue.async {
+            CoverImageLoader.semaphore.wait()
+            self.startRequest()
+        }
+    }
+    
+    private func startRequest() {
+        var request = URLRequest(url: url)
+        request.cachePolicy = .returnCacheDataElseLoad
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer {
+                CoverImageLoader.semaphore.signal()
+                if self.image != nil || self.didFail {
+                    self.isLoading = false
+                }
+            }
+            
+            if let error = error {
+                print("🖼️ Cover fetch error: \(error.localizedDescription) | url=\(self.url.absoluteString)")
+                DispatchQueue.main.async {
+                    self.didFail = true
+                }
+                return
+            }
+            
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 429, self.attempt < self.maxRetries {
+                    let retryDelay = self.retryDelaySeconds(from: http) ?? self.backoffDelay(for: self.attempt)
+                    self.attempt += 1
+                    print("🖼️ Cover fetch HTTP 429 | retrying in \(String(format: "%.2f", retryDelay))s (attempt \(self.attempt)/\(self.maxRetries)) | url=\(self.url.absoluteString)")
+                    CoverImageLoader.downloadQueue.asyncAfter(deadline: .now() + retryDelay) {
+                        CoverImageLoader.semaphore.wait()
+                        self.startRequest()
+                    }
+                    return
+                }
+                
+                if http.statusCode != 200 {
+                    print("🖼️ Cover fetch HTTP \(http.statusCode) | url=\(self.url.absoluteString)")
+                }
+            } else if response != nil {
+                print("🖼️ Cover fetch non-HTTP response | url=\(self.url.absoluteString)")
+            }
+            
+            guard let data = data, !data.isEmpty else {
+                print("🖼️ Cover fetch empty body | url=\(self.url.absoluteString)")
+                DispatchQueue.main.async {
+                    self.didFail = true
+                }
+                return
+            }
+            
+            if let image = UIImage(data: data) {
+                DispatchQueue.main.async {
+                    self.image = image
+                }
+            } else {
+                print("🖼️ Cover fetch invalid image data | url=\(self.url.absoluteString)")
+                DispatchQueue.main.async {
+                    self.didFail = true
+                }
+            }
+        }.resume()
+    }
+    
+    private func retryDelaySeconds(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let retryAfter = response.value(forHTTPHeaderField: "Retry-After") else { return nil }
+        if let seconds = TimeInterval(retryAfter.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return seconds
+        }
+        return nil
+    }
+    
+    private func backoffDelay(for attempt: Int) -> TimeInterval {
+        let exponent = min(attempt, 6)
+        let jitter = Double.random(in: 0.0...0.3)
+        return (baseDelay * pow(2.0, Double(exponent))) + jitter
+    }
+}
+
+struct CoverImageView: View {
+    @StateObject private var loader: CoverImageLoader
+    
+    init(url: URL) {
+        _loader = StateObject(wrappedValue: CoverImageLoader(url: url))
+    }
+    
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.gray.opacity(0.2))
+            if let image = loader.image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if loader.didFail {
+                Image(systemName: "book.closed.fill")
+                    .foregroundColor(.blue)
+                    .font(.title2)
+            } else {
+                ProgressView()
+            }
+        }
+        .onAppear { loader.load() }
     }
 }
 

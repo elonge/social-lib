@@ -7,10 +7,12 @@ struct Book: Identifiable, Codable {
     let publisher: String?
     let year: String?
     let otherText: String?
+    let coverLink: String?
     
     enum CodingKeys: String, CodingKey {
         case title, author, publisher, year
         case otherText = "other_text"
+        case coverLink = "cover_link"
     }
     
     init(from decoder: Decoder) throws {
@@ -21,14 +23,16 @@ struct Book: Identifiable, Codable {
         self.publisher = try container.decodeIfPresent(String.self, forKey: .publisher)
         self.year = try container.decodeIfPresent(String.self, forKey: .year)
         self.otherText = try container.decodeIfPresent(String.self, forKey: .otherText)
+        self.coverLink = try container.decodeIfPresent(String.self, forKey: .coverLink)
     }
     
-    init(id: UUID = UUID(), title: String?, author: String?, publisher: String?, year: String?, otherText: String?) {
+    init(id: UUID = UUID(), title: String?, author: String?, publisher: String?, year: String?, otherText: String?, coverLink: String? = nil) {
         self.id = id
         self.title = title
         self.author = author
         self.publisher = publisher
         self.year = year
         self.otherText = otherText
+        self.coverLink = coverLink
     }
 }

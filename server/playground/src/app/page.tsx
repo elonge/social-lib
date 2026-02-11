@@ -8,6 +8,7 @@ interface Book {
   publisher?: string;
   year?: string;
   other_text?: string;
+  cover_link?: string;
 }
 
 interface FrameResult {
@@ -90,6 +91,7 @@ export default function Home() {
 
     setEnriching(true);
     try {
+      console.log('Completing upload with frames:', selectedFrames.map(f => f.id), 'Enrich:', enrich);
       const response = await fetch(`${API_BASE_URL}/complete_upload`, {
         method: 'POST',
         headers: {
@@ -263,6 +265,7 @@ export default function Home() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cover</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Author</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Publisher</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Year</th>
@@ -272,6 +275,27 @@ export default function Home() {
                   {finalResult.books.map((book, idx) => (
                     <tr key={idx} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold">{book.title}</td>
+                      <td className="px-6 py-4 text-sm">
+                        {book.cover_link ? (
+                          <div className="flex items-center gap-3 min-w-0">
+                            <img
+                              src={book.cover_link}
+                              alt={`${book.title || 'Book'} cover`}
+                              className="h-16 w-12 object-cover rounded border border-gray-200 shadow-sm"
+                            />
+                            <a
+                              href={book.cover_link}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-blue-600 hover:underline max-w-[240px] truncate"
+                            >
+                              {book.cover_link}
+                            </a>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{book.author || '-'}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{book.publisher || '-'}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{book.year || '-'}</td>

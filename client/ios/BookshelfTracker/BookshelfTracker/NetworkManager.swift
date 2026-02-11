@@ -101,7 +101,27 @@ class NetworkManager {
                 }
                 let decodedResponse = try decoder.decode(Response.self, from: data)
                 print("✅ Successfully decoded \(decodedResponse.books.count) books")
-                completion(.success(decodedResponse.books))
+                let books = decodedResponse.books
+                let coverLinks = books.compactMap { $0.coverLink?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                let missingCoverCount = books.count - coverLinks.count
+                let invalidCoverCount = coverLinks.filter { URL(string: $0) == nil }.count
+                if missingCoverCount > 0 {
+                    let missingTitles = books
+                        .filter { ($0.coverLink ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                        .compactMap { $0.title ?? $0.author }
+                    print("⚠️ Missing cover_link for \(missingCoverCount) books. Samples: \(missingTitles.prefix(5))")
+                }
+                if invalidCoverCount > 0 {
+                    let invalidTitles = books
+                        .filter {
+                            guard let link = $0.coverLink?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty else { return false }
+                            return URL(string: link) == nil
+                        }
+                        .compactMap { $0.title ?? $0.author }
+                    print("⚠️ Invalid cover_link URLs for \(invalidCoverCount) books. Samples: \(invalidTitles.prefix(5))")
+                }
+                print("🖼️ cover_link summary: total=\(books.count) present=\(coverLinks.count) missing=\(missingCoverCount) invalid=\(invalidCoverCount)")
+                completion(.success(books))
             } catch {
                 print("❌ Decoding error: \(error)")
                 completion(.failure(error))
