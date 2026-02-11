@@ -1,0 +1,21 @@
+# Ignore local python files
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.env.local
+venv/
+.venv/
+
+# Ignore large data and output
+gemini_video_output/
+*.mp4
+*.jpg
+*.png
+
+# Ignore playground (it will be deployed to Vercel)
+playground/
+
+# Ignore git
+.git
+.gitignore

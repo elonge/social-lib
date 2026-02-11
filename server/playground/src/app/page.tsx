@@ -12,68 +12,85 @@ interface Book {
 
 interface FrameResult {
   id: string;
-  image: string;
+  image?: string;
   books: Book[];
   rawResult: any;
   selected: boolean;
+  status: 'uploading' | 'processing' | 'complete' | 'error';
 }
 
 export default function Home() {
   const [frames, setFrames] = useState<FrameResult[]>([]);
-  const [loading, setLoading] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [finalResult, setFinalResult] = useState<{ books: Book[], stats?: any } | null>(null);
+  const [viewingFrame, setViewingFrame] = useState<FrameResult | null>(null);
+
+  // Use environment variable for API URL, fallback to local for development
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files) return;
 
-    setLoading(true);
+    const newFrames: FrameResult[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const id = Math.random().toString(36).substr(2, 9);
+      newFrames.push({
+        id,
+        books: [],
+        rawResult: null,
+        selected: true,
+        status: 'uploading',
+      });
+    }
+    setFrames((prev) => [...prev, ...newFrames]);
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      const placeholderId = newFrames[i].id;
+
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setFrames(prev => prev.map(f => f.id === placeholderId ? { ...f, image: reader.result as string } : f));
+      };
+      reader.readAsDataURL(file);
+
       const formData = new FormData();
       formData.append('file', file);
 
       try {
-        const response = await fetch('http://127.0.0.1:8000/upload_next_frame', {
+        setFrames(prev => prev.map(f => f.id === placeholderId ? { ...f, status: 'processing' } : f));
+
+        const response = await fetch(`${API_BASE_URL}/upload_next_frame`, {
           method: 'POST',
           body: formData,
         });
 
+        if (!response.ok) throw new Error('Upload failed');
         const data = await response.json();
         
-        // Create a preview URL for the image
-        const reader = new FileReader();
-        const imagePromise = new Promise<string>((resolve) => {
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.readAsDataURL(file);
-        });
-        const imageUrl = await imagePromise;
+        setFrames((prev) => prev.map(f => f.id === placeholderId ? {
+          ...f,
+          books: data.books || [],
+          rawResult: data,
+          status: 'complete'
+        } : f));
 
-        setFrames((prev) => [
-          ...prev,
-          {
-            id: Math.random().toString(36).substr(2, 9),
-            image: imageUrl,
-            books: data.books || [],
-            rawResult: data,
-            selected: true,
-          },
-        ]);
       } catch (error) {
         console.error('Error uploading frame:', error);
+        setFrames((prev) => prev.map(f => f.id === placeholderId ? { ...f, status: 'error' } : f));
       }
     }
-    setLoading(false);
+    event.target.value = '';
   };
 
   const handleCompleteUpload = async (enrich: boolean = false) => {
-    const selectedFrames = frames.filter(f => f.selected);
+    const selectedFrames = frames.filter(f => f.selected && f.status === 'complete');
     if (selectedFrames.length === 0) return;
 
     setEnriching(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/complete_upload', {
+      const response = await fetch(`${API_BASE_URL}/complete_upload`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -103,7 +120,8 @@ export default function Home() {
     setFrames(frames.filter(f => f.id !== id));
   };
 
-  const selectedCount = frames.filter(f => f.selected).length;
+  const selectedCount = frames.filter(f => f.selected && f.status === 'complete').length;
+  const isAnyProcessing = frames.some(f => f.status === 'uploading' || f.status === 'processing');
 
   return (
     <main className="min-h-screen p-8 bg-gray-50 text-gray-900">
@@ -120,7 +138,7 @@ export default function Home() {
               onChange={handleFileUpload}
               className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
             />
-            {loading && <span className="animate-pulse text-blue-500 font-medium">Processing...</span>}
+            {isAnyProcessing && <span className="animate-pulse text-blue-500 font-medium">Processing frames...</span>}
           </div>
         </div>
 
@@ -131,15 +149,15 @@ export default function Home() {
               <div className="flex gap-2">
                 <button
                   onClick={() => handleCompleteUpload(false)}
-                  disabled={enriching || selectedCount === 0}
-                  className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400"
+                  disabled={enriching || selectedCount === 0 || isAnyProcessing}
+                  className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 font-medium"
                 >
                   Merge & Deduplicate
                 </button>
                 <button
                   onClick={() => handleCompleteUpload(true)}
-                  disabled={enriching || selectedCount === 0}
-                  className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 disabled:bg-gray-400"
+                  disabled={enriching || selectedCount === 0 || isAnyProcessing}
+                  className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 disabled:bg-gray-400 font-medium"
                 >
                   {enriching ? 'Enriching...' : 'Merge & Enrich'}
                 </button>
@@ -148,34 +166,71 @@ export default function Home() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {frames.map((frame) => (
-                <div key={frame.id} className={`bg-white rounded-lg shadow-sm overflow-hidden border-2 transition-colors ${frame.selected ? 'border-blue-500' : 'border-gray-200 opacity-60'}`}>
+                <div key={frame.id} className={`bg-white rounded-lg shadow-sm overflow-hidden border-2 transition-all ${frame.selected ? 'border-blue-500' : 'border-gray-200 opacity-60'}`}>
                   <div className="relative h-48 cursor-pointer" onClick={() => toggleFrameSelection(frame.id)}>
-                    <img src={frame.image} alt="frame" className="w-full h-full object-cover" />
+                    {frame.image ? (
+                      <img src={frame.image} alt="frame" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full bg-gray-200 animate-pulse flex items-center justify-center text-gray-400">
+                        Loading image...
+                      </div>
+                    )}
+                    
+                    {frame.status !== 'complete' && (
+                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                         <div className="bg-white px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider animate-bounce">
+                           {frame.status}
+                         </div>
+                      </div>
+                    )}
+
                     <div className="absolute top-2 left-2">
                       <input 
                         type="checkbox" 
                         checked={frame.selected} 
-                        onChange={() => {}} // Handled by div onClick
-                        className="w-5 h-5"
+                        onChange={() => {}} 
+                        disabled={frame.status !== 'complete'}
+                        className="w-5 h-5 cursor-pointer"
                       />
                     </div>
                     <button 
                       onClick={(e) => { e.stopPropagation(); removeFrame(frame.id); }}
-                      className="absolute top-2 right-2 bg-red-500 text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-red-600"
+                      className="absolute top-2 right-2 bg-red-500 text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
                     >
                       ×
                     </button>
                   </div>
                   <div className="p-4">
-                    <p className="font-medium text-sm text-gray-500 mb-2">{frame.books.length} books detected</p>
-                    <ul className="text-xs space-y-1 max-h-32 overflow-y-auto">
-                      {frame.books.slice(0, 5).map((book, idx) => (
-                        <li key={idx} className="truncate">
-                          <span className="font-bold">{book.title}</span> {book.author && `- ${book.author}`}
-                        </li>
-                      ))}
-                      {frame.books.length > 5 && <li className="text-gray-400 italic">...and {frame.books.length - 5} more</li>}
-                    </ul>
+                    {frame.status === 'complete' ? (
+                      <>
+                        <div className="flex justify-between items-center mb-2">
+                          <p className="font-medium text-sm text-gray-500">{frame.books.length} books detected</p>
+                          {frame.books.length > 0 && (
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); setViewingFrame(frame); }}
+                              className="text-xs text-blue-600 hover:underline font-semibold"
+                            >
+                              See all
+                            </button>
+                          )}
+                        </div>
+                        <ul className="text-xs space-y-1 max-h-32 overflow-hidden">
+                          {frame.books.slice(0, 5).map((book, idx) => (
+                            <li key={idx} className="truncate">
+                              <span className="font-bold">{book.title || 'Unknown Title'}</span> {book.author && `- ${book.author}`}
+                            </li>
+                          ))}
+                          {frame.books.length > 5 && <li className="text-gray-400 italic">...and {frame.books.length - 5} more</li>}
+                          {frame.books.length === 0 && <li className="text-gray-400 italic">No books identified</li>}
+                        </ul>
+                      </>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="h-3 bg-gray-200 rounded w-3/4 animate-pulse"></div>
+                        <div className="h-2 bg-gray-200 rounded w-1/2 animate-pulse"></div>
+                        <div className="h-2 bg-gray-200 rounded w-5/6 animate-pulse"></div>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -189,7 +244,7 @@ export default function Home() {
               <h2 className="text-2xl font-bold text-green-700">Final Results ({finalResult.books.length} unique books)</h2>
               <button 
                 onClick={() => setFinalResult(null)}
-                className="text-gray-400 hover:text-gray-600"
+                className="text-gray-400 hover:text-gray-600 font-medium"
               >
                 Clear Results
               </button>
@@ -227,6 +282,52 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* Frame Detail Modal */}
+      {viewingFrame && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl">
+            <div className="p-4 border-b flex justify-between items-center sticky top-0 bg-white rounded-t-xl">
+              <h3 className="text-xl font-bold">Books in Frame</h3>
+              <button 
+                onClick={() => setViewingFrame(null)}
+                className="text-gray-500 hover:text-gray-700 text-2xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="mb-6 rounded-lg overflow-hidden border">
+                <img src={viewingFrame.image} alt="frame" className="w-full h-auto" />
+              </div>
+              <table className="min-w-full divide-y divide-gray-200 border">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">Title</th>
+                    <th className="px-4 py-2 text-left text-xs font-bold text-gray-600 uppercase">Author</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {viewingFrame.books.map((book, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      <td className="px-4 py-2 text-sm font-medium">{book.title || 'Unknown'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-600">{book.author || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="p-4 border-t text-right">
+              <button 
+                onClick={() => setViewingFrame(null)}
+                className="bg-gray-100 px-4 py-2 rounded-lg hover:bg-gray-200 font-medium transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
