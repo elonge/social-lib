@@ -8,11 +8,15 @@ from book_extractor import process_image_bytes
 from book_enricher import BookEnricher
 from deduplicator import BookDeduplicator
 from session_manager import get_session_store
+from image_storage import get_image_storage
 
 app = FastAPI(title="Book spine extractor API")
 
 # Initialize session store (using memory for now, can be switched to redis via env)
 session_store = get_session_store("memory")
+
+# Initialize image storage
+image_storage = get_image_storage("file")
 
 # Add CORS middleware
 app.add_middleware(
@@ -25,7 +29,7 @@ app.add_middleware(
 
 class CompleteUploadRequest(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
-    sessionId: Optional[str] = None
+    session_id: Optional[str] = None
     enrich: Optional[bool] = False
     metadata: Dict[str, Any] = {}
 
@@ -36,14 +40,19 @@ async def init_upload():
     Initializes a new upload session.
     """
     session_id = str(uuid.uuid4())
-    session_store.createSession(session_id, {}, ttl_seconds=3600)
-    return {"status": "success", "sessionId": session_id}
+    session_store.create_session(session_id, {}, ttl_seconds=3600)
+    return {"status": "success", "session_id": session_id}
 
 @app.post("/upload_frame")
-async def upload_frame(file: UploadFile = File(...), sessionId: Optional[str] = Form(None), frame_id: Optional[int] = Form(None)):
+async def upload_frame(
+    file: UploadFile = File(...), 
+    session_id: Optional[str] = Form(None), 
+    frame_id: Optional[int] = Form(None),
+    user_id: Optional[str] = Form("default_user")
+):
     """
     Receives an image file, extracts books, enriches them, and returns them with a count.
-    Saves results to session using books_<frame_id> if sessionId is provided.
+    Saves results to session using books_<frame_id> if session_id is provided.
     If frame_id is not provided, current millisecond timestamp is used.
     """
     # Read image bytes
@@ -52,6 +61,9 @@ async def upload_frame(file: UploadFile = File(...), sessionId: Optional[str] = 
     # 0. Handle frame_id fallback
     if frame_id is None:
         frame_id = time.time_ns() // 1_000_000
+    
+    # 0.5 Save the frame image
+    ##### TODO image_path = image_storage.save_image(user_id, str(frame_id), content)
     
     # 1. Process the image using Gemini to extract raw books
     result = process_image_bytes(image_bytes=content)
@@ -66,14 +78,15 @@ async def upload_frame(file: UploadFile = File(...), sessionId: Optional[str] = 
             "status": "success",
             "books": enriched_books,
             "enrichment_stats": stats,
-            "usage": result.get("usage")
+            "usage": result.get("usage"),
+            "image_path": image_path
         }
         
-        # 3. Save to session if sessionId is provided
-        if sessionId:
-            print(f"Saving to session: {sessionId}, frame_id: {frame_id}")
-            session_store.put(sessionId, f"books_{frame_id}", response_data)
-            response_data["sessionId"] = sessionId
+        # 3. Save to session if session_id is provided
+        if session_id:
+            print(f"Saving to session: {session_id}, frame_id: {frame_id}")
+            session_store.put(session_id, f"books_{frame_id}", response_data)
+            response_data["session_id"] = session_id
             response_data["frame_id"] = frame_id
             
         return response_data
@@ -89,8 +102,8 @@ async def complete_upload(request: CompleteUploadRequest):
     results = request.results
     
     # If results are not provided, try to fetch from session
-    if not results and request.sessionId:
-        full_session = session_store.getSession(request.sessionId)
+    if not results and request.session_id:
+        full_session = session_store.get_session(request.session_id)
         if not full_session:
             return {"status": "error", "message": "Session not found"}
         
@@ -126,9 +139,9 @@ async def complete_upload(request: CompleteUploadRequest):
     dedupe_count = len(all_books) - len(final_books)
     
     # 2. Cleanup session if it was used
-    if request.sessionId:
-        print(f"Deleting session: {request.sessionId}")
-        session_store.deleteSession(request.sessionId)
+    if request.session_id:
+        print(f"Deleting session: {request.session_id}")
+        session_store.delete_session(request.session_id)
     
     return {
         "status": "success",
