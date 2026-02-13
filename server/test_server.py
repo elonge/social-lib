@@ -30,15 +30,17 @@ def test_upload_next_frame():
         assert "enrichment_stats" in res_json
 
 def test_complete_upload_proximity():
-    print("\nTesting /complete_upload with proximity deduplication...")
+    print("\nTesting /complete_upload with proximity deduplication and frame_ids...")
     results = [
         {
+            "frame_id": 101,
             "books": [
                 {"title": "The Great Gatsby", "author": "F. Scott Fitzgerald", "isbn": "123"},
                 {"title": "1984", "author": "George Orwell", "isbn": "456"}
             ]
         },
         {
+            "frame_id": 102,
             "books": [
                 {"title": "The Great Gatsby", "author": "F. Scott Fitzgerald", "isbn": "123"}, # Dupe
                 {"title": "Animal Farm", "author": "George Orwell", "isbn": "789"}
@@ -46,7 +48,7 @@ def test_complete_upload_proximity():
         }
     ]
     
-    data = {"results": results}
+    data = {"results": results, "user_id": "test_user_1"}
     response = requests.post(f"{BASE_URL}/complete_upload", json=data)
     
     print(f"Status Code: {response.status_code}")
@@ -58,11 +60,16 @@ def test_complete_upload_proximity():
     stats = res_json["deduplication_stats"]
     
     print(f"Total Books after dedupe: {len(books)}")
-    print(f"Stats: {stats}")
-    
     assert len(books) == 3
     assert stats["proximity_deduped"] == 1
-    print("Proximity deduplication verified!")
+    
+    # Check frame_ids aggregation
+    gatsby = next(b for b in books if b.get("isbn") == "123")
+    print(f"Gatsby frame_ids: {gatsby.get('frame_ids')}")
+    assert 101 in gatsby.get("frame_ids", [])
+    assert 102 in gatsby.get("frame_ids", [])
+    
+    print("Proximity deduplication and frame_id aggregation verified!")
 
 def test_enrich_book():
     print("\nTesting /enrich_book with diagnostics...")

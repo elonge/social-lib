@@ -1,7 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Annotated
 import uuid
 import time
 from book_extractor import process_image_bytes
@@ -9,14 +10,48 @@ from book_enricher import BookEnricher
 from deduplicator import BookDeduplicator
 from session_manager import get_session_store
 from image_storage import get_image_storage
+from document_store import MongoDocumentStore, PartitionKey, SortKey, default_to_dict as to_dict
+
+@dataclass
+class RawLibraryEntry:
+    user_id: Annotated[str, PartitionKey]
+    frame_id: Annotated[int, SortKey]
+    name: Optional[str] = None
+    books: List[Dict[str, Any]] = field(default_factory=list)
+
+@dataclass
+class LibraryBook:
+    user_id: Annotated[str, PartitionKey]
+    book_id: Annotated[str, SortKey] # ISBN or title|author
+    title: str
+    author: Optional[str] = None
+    isbn: Optional[str] = None
+    frame_ids: List[int] = field(default_factory=list)
 
 app = FastAPI(title="Book spine extractor API")
 
-# Initialize session store (using memory for now, can be switched to redis via env)
+# Initialize session store
 session_store = get_session_store("memory")
 
 # Initialize image storage
 image_storage = get_image_storage("file")
+
+# Initialize document stores
+# Use environment variables if available
+mongo_conn = "mongodb://localhost:27017/"
+raw_library_store = MongoDocumentStore[RawLibraryEntry, RawLibraryEntry](
+    connection_string=mongo_conn,
+    database_name="social_lib",
+    collection_name="user_raw_library"
+)
+
+user_library_store = MongoDocumentStore[LibraryBook, LibraryBook](
+    connection_string=mongo_conn,
+    database_name="social_lib",
+    collection_name="user_library"
+)
+raw_library_store.create_table()
+user_library_store.create_table()
 
 # Add CORS middleware
 app.add_middleware(
@@ -32,6 +67,7 @@ class CompleteUploadRequest(BaseModel):
     session_id: Optional[str] = None
     enrich: Optional[bool] = False
     metadata: Dict[str, Any] = {}
+    user_id: str = "default_user"
 
 @app.get("/init_upload")
 @app.post("/init_upload")
@@ -48,12 +84,13 @@ async def upload_frame(
     file: UploadFile = File(...), 
     session_id: Optional[str] = Form(None), 
     frame_id: Optional[int] = Form(None),
-    user_id: Optional[str] = Form("default_user")
+    user_id: Optional[str] = Form("default_user"),
+    name: Optional[str] = Form(None)
 ):
     """
     Receives an image file, extracts books, enriches them, and returns them with a count.
     Saves results to session using books_<frame_id> if session_id is provided.
-    If frame_id is not provided, current millisecond timestamp is used.
+    Saves raw library entry to MongoDB.
     """
     # Read image bytes
     content = await file.read()
@@ -63,7 +100,7 @@ async def upload_frame(
         frame_id = time.time_ns() // 1_000_000
     
     # 0.5 Save the frame image
-    ##### TODO image_path = image_storage.save_image(user_id, str(frame_id), content)
+    image_path = image_storage.save_image(user_id, str(frame_id), content)
     
     # 1. Process the image using Gemini to extract raw books
     result = process_image_bytes(image_bytes=content)
@@ -74,12 +111,18 @@ async def upload_frame(
         enricher = BookEnricher()
         enriched_books, stats = enricher.batch_enrich(raw_books, dedupe_mode="counting")
         
+        # 2.5 Save to raw library document store
+        entry = RawLibraryEntry(user_id=user_id, frame_id=frame_id, name=name, books=enriched_books)
+        raw_library_store.put(entry, entry)
+
         response_data = {
             "status": "success",
             "books": enriched_books,
             "enrichment_stats": stats,
             "usage": result.get("usage"),
-            "image_path": image_path
+            "image_path": image_path,
+            "frame_id": frame_id,
+            "name": name
         }
         
         # 3. Save to session if session_id is provided
@@ -87,7 +130,6 @@ async def upload_frame(
             print(f"Saving to session: {session_id}, frame_id: {frame_id}")
             session_store.put(session_id, f"books_{frame_id}", response_data)
             response_data["session_id"] = session_id
-            response_data["frame_id"] = frame_id
             
         return response_data
     
@@ -96,10 +138,12 @@ async def upload_frame(
 @app.post("/complete_upload")
 async def complete_upload(request: CompleteUploadRequest):
     """
-    Receives a list of JSON results from upload_next_frame.
+    Receives a list of JSON results from upload_frame.
     Deduplicates books by proximity (already enriched).
+    Saves aggregated library to MongoDB.
     """
     results = request.results
+    user_id = request.user_id
     
     # If results are not provided, try to fetch from session
     if not results and request.session_id:
@@ -126,19 +170,40 @@ async def complete_upload(request: CompleteUploadRequest):
     if not results:
         return {"status": "error", "message": "No results provided and no session found"}
         
-    all_books = []
+    all_books_to_dedupe = []
     
-    # Collect all books in their original sequence
+    # Collect all books and attach their frame_id for deduplication tracking
     for res in results:
+        frame_id = res.get("frame_id")
         books = res.get("books", [])
-        all_books.extend(books)
+        for book in books:
+            book_copy = book.copy()
+            book_copy["frame_id"] = frame_id
+            all_books_to_dedupe.append(book_copy)
     
     # 1. Apply proximity-based deduplication
-    # dedupe_window defaults to 5
-    final_books = BookDeduplicator.deduplicate_proximity(all_books)
-    dedupe_count = len(all_books) - len(final_books)
+    final_books = BookDeduplicator.deduplicate_proximity(all_books_to_dedupe)
+    dedupe_count = len(all_books_to_dedupe) - len(final_books)
     
-    # 2. Cleanup session if it was used
+    # 2. Save aggregated books to user_library document store
+    for book in final_books:
+        book_id = book.get("isbn")
+        if not book_id:
+            title = book.get("title", "").lower().strip()
+            author = book.get("author", "").lower().strip()
+            book_id = f"{title}|{author}"
+        
+        lib_book = LibraryBook(
+            user_id=user_id,
+            book_id=book_id,
+            title=book.get("title", "Unknown"),
+            author=book.get("author"),
+            isbn=book.get("isbn"),
+            frame_ids=book.get("frame_ids", [])
+        )
+        user_library_store.put(lib_book, lib_book)
+
+    # 3. Cleanup session if it was used
     if request.session_id:
         print(f"Deleting session: {request.session_id}")
         session_store.delete_session(request.session_id)

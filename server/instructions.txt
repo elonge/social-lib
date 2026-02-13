@@ -1,10 +1,10 @@
 Examples of how I tested it:
-session=$(curl -X POST localhost:8000/init_upload | jq .sessionId | tr -d '"')
-curl -X POST localhost:8000/upload_frame -F sessionId=$session -F file=@./gemini_video_output/frames/frame_000050.jpg > /tmp/f1
-curl -X POST localhost:8000/upload_frame -F sessionId=$session -F file=@./gemini_video_output/frames/frame_000100.jpg > /tmp/f2
-curl -X POST localhost:8000/upload_frame -F sessionId=$session -F file=@./gemini_video_output/frames/frame_000150.jpg > /tmp/f3
+session=$(curl -X POST localhost:8000/init_upload | jq .session_id | tr -d '"')
+curl -X POST localhost:8000/upload_frame -F session_id=$session -F file=@./gemini_video_output/frames/frame_000050.jpg > /tmp/f1
+curl -X POST localhost:8000/upload_frame -F session_id=$session -F file=@./gemini_video_output/frames/frame_000100.jpg > /tmp/f2
+curl -X POST localhost:8000/upload_frame -F session_id=$session -F file=@./gemini_video_output/frames/frame_000150.jpg > /tmp/f3
 
-curl -X POST localhost:8000/complete_upload -d '{"sessionId":"c4356321-d916-4580-86cb-9df1c176cbac"}' -H 'content-type: application/json' | jq
+curl -X POST localhost:8000/complete_upload -d '{"session_id":"c4356321-d916-4580-86cb-9df1c176cbac"}' -H 'content-type: application/json' | jq
 
 OR
 

@@ -7,30 +7,44 @@ class BookDeduplicator:
     def deduplicate_proximity(books: List[Dict[str, Any]], window_size: int = 20) -> List[Dict[str, Any]]:
         """
         Removes books that appear twice in close proximity based on ISBN and count.
-        If the ISBN is same but count is different, it's not a duplicate.
+        Aggregates frame_ids for duplicates.
         """
         if not books:
             return []
             
         deduplicated = []
-        recent_entries = []
+        # isbn_count_key -> index in deduplicated list
+        recent_entries = {}
         
         for book in books:
             isbn = book.get("isbn")
             count = book.get("count", 1)
+            frame_id = book.get("frame_id")
             
+            key = (isbn, count) if isbn else None
             is_dupe = False
-            if isbn:
-                # Check if this (ISBN, count) was seen recently
-                if (isbn, count) in recent_entries:
-                    is_dupe = True
+            
+            if key and key in recent_entries:
+                idx = recent_entries[key]
+                is_dupe = True
+                # Aggregate frame_id
+                if frame_id:
+                    if "frame_ids" not in deduplicated[idx]:
+                        deduplicated[idx]["frame_ids"] = []
+                    if frame_id not in deduplicated[idx]["frame_ids"]:
+                        deduplicated[idx]["frame_ids"].append(frame_id)
             
             if not is_dupe:
-                deduplicated.append(book)
-                if isbn:
-                    recent_entries.append((isbn, count))
+                book_copy = book.copy()
+                if frame_id:
+                    book_copy["frame_ids"] = [frame_id]
+                deduplicated.append(book_copy)
+                if key:
+                    recent_entries[key] = len(deduplicated) - 1
                     if len(recent_entries) > window_size:
-                        recent_entries.pop(0)
+                        # Remove oldest from map
+                        oldest_key = list(recent_entries.keys())[0]
+                        del recent_entries[oldest_key]
                         
         return deduplicated
 
