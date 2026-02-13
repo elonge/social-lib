@@ -5,6 +5,7 @@ import requests
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
+from deduplicator import BookDeduplicator
 
 class BookEnricher:
     """Enrich book metadata using external APIs and Gemini."""
@@ -71,17 +72,44 @@ class BookEnricher:
         diagnostics["duration_seconds"] = time.time() - start_time
         return enriched, diagnostics
 
-    def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5, dedupe_mode: Optional[str] = "proximity", dedupe_window: int = 20) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Enrich multiple books in parallel and return results plus aggregated diagnostics.
+        Enrich multiple books in parallel, deduplicate results, and return results plus aggregated diagnostics.
+        dedupe_mode: "proximity", "counting", or None
         """
         start_time = time.time()
+        
+        # Filter out books that do not have a title
+        books = [b for b in books if b.get("title", "").strip()]
+        
+        if not books:
+             return [], {
+                "total_books": 0,
+                "google_books_hits": 0,
+                "open_library_hits": 0,
+                "gemini_calls": 0,
+                "total_duration_seconds": 0.0,
+                "average_book_duration": 0.0,
+                "deduplicated_count": 0
+            }
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # zip results to separate books and diagnostics
             results = list(executor.map(self.enrich_book, books))
             
         enriched_books = [r[0] for r in results]
         individual_diagnostics = [r[1] for r in results]
+        
+        # Deduplicate enriched books
+        dedupe_count = 0
+        if dedupe_mode == "proximity":
+            deduplicated_books = BookDeduplicator.deduplicate_proximity(enriched_books, window_size=dedupe_window)
+            dedupe_count = len(enriched_books) - len(deduplicated_books)
+        elif dedupe_mode == "counting":
+            deduplicated_books = BookDeduplicator.deduplicate_counting(enriched_books)
+            dedupe_count = len(enriched_books) - len(deduplicated_books)
+        else:
+            deduplicated_books = enriched_books
         
         total_duration = time.time() - start_time
         
@@ -92,19 +120,21 @@ class BookEnricher:
             "open_library_hits": sum(1 for d in individual_diagnostics if d["open_library_success"]),
             "gemini_calls": sum(1 for d in individual_diagnostics if d["gemini_correction_used"]),
             "total_duration_seconds": total_duration,
-            "average_book_duration": sum(d["duration_seconds"] for d in individual_diagnostics) / len(books) if books else 0
+            "average_book_duration": sum(d["duration_seconds"] for d in individual_diagnostics) / len(books) if books else 0,
+            "deduplicated_count": dedupe_count
         }
         
-        print(f"\n--- Batch Enrichment Diagnostics ---")
+        print(f"\n--- Batch Enrichment Diagnostics ({dedupe_mode or 'no dedupe'}) ---")
         print(f"Total Books: {aggregated['total_books']}")
         print(f"Google Books Success: {aggregated['google_books_hits']}/{aggregated['total_books']}")
         print(f"Open Library Success: {aggregated['open_library_hits']}/{aggregated['total_books']}")
         print(f"Gemini Corrections: {aggregated['gemini_calls']}")
+        print(f"Books Deduplicated: {aggregated['deduplicated_count']}")
         print(f"Total Elapsed Time: {aggregated['total_duration_seconds']:.2f}s")
         print(f"Average Book Time: {aggregated['average_book_duration']:.2f}s")
         print(f"-------------------------------------\n")
         
-        return enriched_books, aggregated
+        return deduplicated_books, aggregated
 
     def _fetch_external_data(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
         """DEPRECATED: Use raw fetch and combine for diagnostics."""
@@ -123,6 +153,7 @@ class BookEnricher:
             combined["year"] = ol_data.get("year") or gb_data.get("year")
             combined["author"] = ol_data.get("author") or gb_data.get("author")
             combined["language"] = ol_data.get("language") or gb_data.get("language")
+            combined["isbn"] = ol_data.get("isbn") or gb_data.get("isbn")
             combined["cover_link"] = ol_data.get("cover_link") or gb_data.get("cover_link")
         if combined.get("cover_link"):
             combined["cover_link"] = self._normalize_cover_link(combined.get("cover_link"))
@@ -146,7 +177,17 @@ class BookEnricher:
             if response.status_code == 200:
                 data = response.json()
                 if "items" in data:
-                    volume_info = data["items"][0]["volumeInfo"]
+                    item = data["items"][0]
+                    volume_info = item["volumeInfo"]
+                    
+                    # Extract ISBN
+                    isbn = None
+                    for identifier in volume_info.get("industryIdentifiers", []):
+                        if identifier.get("type") in ["ISBN_13", "ISBN_10"]:
+                            isbn = identifier.get("identifier")
+                            if identifier.get("type") == "ISBN_13":
+                                break  # Prefer ISBN_13
+                                
                     return {
                         "title": volume_info.get("title"),
                         "author": ", ".join(volume_info.get("authors", [])),
@@ -154,6 +195,7 @@ class BookEnricher:
                         "year": volume_info.get("publishedDate", "")[:4],
                         "language": volume_info.get("language"),
                         "description": volume_info.get("description"),
+                        "isbn": isbn,
                         "cover_link": self._normalize_cover_link(volume_info.get("imageLinks", {}).get("thumbnail"))
                     }
         except Exception as e:
@@ -173,12 +215,18 @@ class BookEnricher:
                 data = response.json()
                 if data.get("docs"):
                     doc = data["docs"][0]
+                    
+                    # Extract ISBN (Open Library usually returns a list)
+                    isbns = doc.get("isbn", [])
+                    isbn = isbns[0] if isbns else None
+                    
                     return {
                         "title": doc.get("title"),
                         "author": ", ".join(doc.get("author_name", [])),
                         "publisher": ", ".join(doc.get("publisher", [])[:1]),
                         "year": str(doc.get("first_publish_year", "")),
                         "language": ", ".join(doc.get("language", [])[:1]),
+                        "isbn": isbn,
                         "cover_link": f"https://covers.openlibrary.org/b/id/{doc.get('cover_i')}-L.jpg" if doc.get("cover_i") else None
                     }
         except Exception as e:

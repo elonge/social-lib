@@ -15,6 +15,7 @@ from google import genai
 from PIL import Image
 import time
 import io
+from deduplicator import BookDeduplicator
 
 class GeminiBookExtractor:
     """Extract book information from images using Gemini Vision API."""
@@ -113,6 +114,8 @@ Header: title | author | publisher | year | other_text
 
 If a field is not visible, use "null".
 If you see a book but cannot read it, include it with "null" values.
+
+Return the books in the order they appear from left to right (for vertically stacked books), and top to bottom (for horiozontally stacked books)
 
 Only return the table, no other text. Do not include markdown code blocks."""
 
@@ -410,9 +413,24 @@ def process_image_bytes(
     # Extract books
     result = extractor.extract_books_from_image_bytes(image_bytes)
     
-    # Print summary
+    # Post-process: filter and deduplicate
     if "books" in result and result["books"]:
-        print(f"\nFound {len(result['books'])} books:")
+        raw_books = result["books"]
+        
+        # 1. Filter out books without titles
+        filtered_books = [b for b in raw_books if b.get("title")]
+        
+        # 2. Apply richness-based deduplication
+        deduplicated_books = BookDeduplicator.deduplicate_richness(filtered_books)
+        
+        result["books"] = deduplicated_books
+        result["raw_books_count"] = len(raw_books)
+        result["filtered_books_count"] = len(filtered_books)
+        result["deduplicated_books_count"] = len(deduplicated_books)
+        
+        # Print summary
+        count = len(deduplicated_books)
+        print(f"\nFound {count} unique books (after filtering {len(raw_books) - len(filtered_books)} title-less and deduplicating {len(filtered_books) - count})")
         for i, book in enumerate(result["books"], 1):
             title = book.get("title", "Unknown")
             author = book.get("author", "Unknown")
