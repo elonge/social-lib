@@ -78,7 +78,7 @@ class BookDeduplicator:
         return list(unique_books.values())
 
     @staticmethod
-    def deduplicate_richness(books: List[Dict[str, Any]], window_size: int = 5) -> List[Dict[str, Any]]:
+    def deduplicate_richness(books: List[Dict[str, Any]], window_size: int = 20) -> List[Dict[str, Any]]:
         """
         Groups books that appear twice in close proximity based on TITLE.
         Significant for extraction stage where ISBN is missing.

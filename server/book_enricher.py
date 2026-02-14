@@ -77,7 +77,7 @@ class BookEnricher:
         diagnostics["duration_seconds"] = time.perf_counter() - start_time
         return enriched, diagnostics
 
-    async def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5, dedupe_mode: Optional[str] = "proximity", dedupe_window: int = 20) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5, dedupe_mode: Optional[str] = "counting", dedupe_window: int = 20) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Enrich multiple books in parallel, deduplicate results, and return results plus aggregated diagnostics.
         dedupe_mode: "proximity", "counting", or None

@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TypeVar, Generic, Callable, Annotated, get_type_hints, get_args, get_origin
 from dataclasses import dataclass, field, make_dataclass
 import datetime
-
+from pymongo import MongoClient
 
 @dataclass
 class OperationParams:
@@ -18,6 +18,9 @@ class GetParams(OperationParams):
     consistent_read: bool = False
     reverse: bool = False
     batch_size: Optional[int] = None
+    limit: Optional[int] = None
+    include_from: Optional[int] = None
+    include_to: Optional[int] = None
 
 @dataclass
 class DeleteParams(OperationParams):
@@ -351,10 +354,9 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
         pass
 
 class MongoDocumentStore(DocumentStore[K, V]):
-    def __init__(self, connection_string: str, database_name: str, collection_name: str, *args, **kwargs):
+    def __init__(self, client: MongoClient, database_name: str, collection_name: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        from pymongo import MongoClient
-        self.client = MongoClient(connection_string)
+        self.client = client
         self.db = self.client[database_name]
         self.collection_name = collection_name
         self.collection = self.db[collection_name]
@@ -577,10 +579,9 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
     Stores data in a list 'items' within a document identified by partition key.
     Each item in the list has 'sk' (sort key) and 'd' (data).
     """
-    def __init__(self, connection_string: str, database_name: str, collection_name: str, *args, **kwargs):
+    def __init__(self, client: MongoClient, database_name: str, collection_name: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        from pymongo import MongoClient
-        self.client = MongoClient(connection_string)
+        self.client = client
         self.db = self.client[database_name]
         self.collection = self.db[collection_name]
         self.collection_name = collection_name

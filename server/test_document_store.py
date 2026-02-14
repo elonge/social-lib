@@ -59,7 +59,7 @@ class DocumentStoreTestMixin:
         k2 = ComplexKey(org_id="g", dept_id=1, category="A", timestamp="2026-01-02")
         k3 = ComplexKey(org_id="g", dept_id=1, category="B", timestamp="2026-01-01")
         
-        # Put and Get
+        # Put and Geet
         self.store.put(k1, {"v": 1})
         self.assertEqual(self.store.get(k1), {"v": 1})
         
@@ -248,11 +248,12 @@ class TestInMemoryDocumentStore(DocumentStoreTestMixin): #, unittest.TestCase):
         )
 
 class TestMongoDocumentStore(DocumentStoreTestMixin): #, unittest.TestCase):
+    from pymongo import MongoClient
     def setUp(self):
         # We no longer skip if Mongo is not reachable, to help with debugging.
         self.collection_name = "test_collection_unique"
         self.store = MongoDocumentStore[Any, Any](
-            connection_string="mongodb://localhost:27017/",
+            client=MongoClient("mongodb://localhost:27017/"),
             database_name="test_db",
             collection_name=self.collection_name,
             from_dict_fn=lambda d: MyNote(**d) if d and "title" in d else d # type: ignore
@@ -279,7 +280,7 @@ class TestMongoEmbeddedDocumentStore(DocumentStoreTestMixin, unittest.TestCase):
         # Since we can't pass a single key_type that covers all, 
         # we rely on the fact that _discover_attrs is called per key instance.
         self.store = MongoEmbeddedDocumentStore(
-            connection_string="mongodb://localhost:27017/",
+            client=MongoClient("mongodb://localhost:27017/"),
             database_name="test_social_lib",
             collection_name=self.collection_name,
             from_dict_fn=lambda d: MyNote(**d) if d and "title" in d else d
