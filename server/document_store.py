@@ -1,4 +1,3 @@
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TypeVar, Generic, Callable, Annotated, get_type_hints, get_args, get_origin
 from dataclasses import dataclass, field, make_dataclass
@@ -183,25 +182,25 @@ class DocumentStore(Generic[K, V], ABC):
     def _reconstruct_key(self, values: Tuple[Any, ...]) -> K:
         # If we have a key_type, try to populate it
         if self.key_type:
-             if self.key_type in (str, int, float, bool, datetime.date):
-                 return values[0] # type: ignore
-             if self.key_type == tuple:
-                 return values # type: ignore
+            if self.key_type in (str, int, float, bool, datetime.date):
+                return values[0] # type: ignore
+            if self.key_type == tuple:
+                return values # type: ignore
                  
-             # Assuming dataclass or user object with __init__
-             if hasattr(self.key_type, "__dataclass_fields__") or isinstance(self.key_type, type):
-                 if not self._key_attrs:
-                     self._discover_attrs(self.key_type)
-                 
-                 kwargs = {}
-                 for i, attr in enumerate(self._key_attrs):
-                     if i < len(values):
-                         kwargs[attr] = values[i]
-                 try:
-                     return self.key_type(**kwargs)
-                 except Exception:
-                     # Fallback if init fails
-                     pass
+            # Assuming dataclass or user object with __init__
+            if hasattr(self.key_type, "__dataclass_fields__") or isinstance(self.key_type, type):
+                if not self._key_attrs:
+                    self._discover_attrs(self.key_type)
+                
+                kwargs = {}
+                for i, attr in enumerate(self._key_attrs):
+                    if i < len(values):
+                        kwargs[attr] = values[i]
+                try:
+                    return self.key_type(**kwargs)
+                except Exception:
+                    # Fallback if init fails
+                    pass
 
         if len(values) == 1:
             return values[0] # type: ignore

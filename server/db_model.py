@@ -28,6 +28,7 @@ class LibraryBook:
     author: Optional[str] = None
     isbn: Optional[str] = None
     frame_ids: List[int] = field(default_factory=list)
+    copies: int = 1
 
 @dataclass(frozen=True)
 class ShelfFrameMetadataKey:

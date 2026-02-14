@@ -105,7 +105,8 @@ mongo_client = MongoClient(mongo_conn)
 user_raw_books_store = MongoDocumentStore[RawLibraryBookKey, RawLibraryBookEntry](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="user_raw_library",
+    collection_name="user_raw_books",
+    key_type=RawLibraryBookKey,
     data_type=RawLibraryBookEntry
 )
 
@@ -117,10 +118,10 @@ user_books_store = MongoDocumentStore[LibraryBookKey, LibraryBook](
     data_type=LibraryBook
 )
 
-user_shelf_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
+user_shelf_frame_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="user_shelf_metadata",
+    collection_name="user_shelf_frame_metadata",
     key_type=ShelfFrameMetadataKey,
     data_type=ShelfFrameMetadata
 )
@@ -130,7 +131,7 @@ user_shelf_store = MongoDocumentStore[ShelfKey, Shelf](client=mongo_client, data
 
 user_raw_books_store.create_table()
 user_library_store.create_table()
-user_shelf_metadata_store.create_table()
+user_shelf_frame_metadata_store.create_table()
 user_library_store.create_table()
 user_shelf_store.create_table()
 
@@ -192,8 +193,6 @@ user_store.create_table()
 class CompleteUploadRequest(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
     session_id: Optional[str] = None
-    enrich: Optional[bool] = False
-    metadata: Dict[str, Any] = {}
     metadata: Dict[str, Any] = {}
 
 class UserResponse(BaseModel):
@@ -352,7 +351,7 @@ async def upload_frame(
             book_count=len(enriched_books),
             uploaded_at=time.time()
         )
-        user_shelf_metadata_store.put(meta_key, metadata)
+        user_shelf_frame_metadata_store.put(meta_key, metadata)
 
         response_data = {
             "status": "success",
@@ -386,7 +385,17 @@ async def complete_upload(
     """
     results = request.results
     user_id = current_user["uid"]
-    
+
+    # Patch for reconstructing library from raw books
+    if request.session_id == "my_library":
+        frames = user_raw_books_store.get_range(RawLibraryBookKey(user_id, 0), RawLibraryBookKey(user_id, time.time_ns() // 1_000_000))
+        results = []
+        for frame in frames:
+            f = frame[1]
+            f.frame_id = frame[0].frame_id
+            results.append(to_dict(f))
+        library_id = "my_library"
+
     # If results are not provided, try to fetch from session
     if not results and request.session_id:
         full_session = session_store.get_session(request.session_id)
@@ -404,7 +413,7 @@ async def complete_upload(
                 return int(k.split("_")[1])
             except (IndexError, ValueError):
                 return 0
-                
+        
         frame_keys.sort(key=get_frame_num)
         results = [full_session[k] for k in frame_keys]
         
@@ -425,9 +434,12 @@ async def complete_upload(
             book_copy["frame_id"] = frame_id
             all_books_to_dedupe.append(book_copy)
 
-    frame_to_shelf = {res.get("frame_id"): res.get("shelf_id") for res in results}
+    frame_to_shelf = {res.get("frame_id"): res.get("shelf") for res in results}
 
     deduped_books = BookDeduplicator.deduplicate_proximity(all_books_to_dedupe)
+    for book in deduped_books:
+        shelves = list({frame_to_shelf.get(frame_id) for frame_id in book["frame_ids"]})
+        book["shelves"] = shelves
 
     deduped_count = len(all_books_to_dedupe) - len(deduped_books)
 
@@ -447,28 +459,28 @@ async def complete_upload(
             
         shelves_for_book = set()
         for fid in book_frame_ids:
-            shelf_id = frame_to_shelf.get(fid)
-            if shelf_id:
-                shelves_for_book.add(shelf_id)
+            shelf = frame_to_shelf.get(fid)
+            if shelf:
+                shelves_for_book.add(shelf)
         
         if not shelves_for_book:
             unshelved_books.append(book)
         else:
-            for shelf_id in shelves_for_book:
-                if shelf_id not in books_by_shelf:
-                    books_by_shelf[shelf_id] = []
-                books_by_shelf[shelf_id].append(book)
+            for shelf in shelves_for_book:
+                if shelf not in books_by_shelf:
+                    books_by_shelf[shelf] = []
+                books_by_shelf[shelf].append(book)
 
     # For each affected shelf: Delete old content and Insert new
-    for shelf_id, shelf_books in books_by_shelf.items():
+    for shelf, shelf_books in books_by_shelf.items():
         # Delete range for (user_id, library, shelf)
         # We need a way to specify partial sort key for range delete?
         # DocumentStore.delete_range(start, end)
         # start = (user_id, library, shelf, "")
         # end = (user_id, library, shelf, "\uffff")
         
-        del_start = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id="")
-        del_end = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id="\uffff")
+        del_start = LibraryBookKey(user_id, library_id, shelf, "")
+        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
         user_books_store.delete_range(del_start, del_end)
         
         # Insert new books
@@ -479,21 +491,22 @@ async def complete_upload(
                 author = book.get("author", "").lower().strip()
                 book_id = f"{title}|{author}"
             
-            lib_key = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id=book_id)
+            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
             lib_book = LibraryBook(
                 key=lib_key,
                 title=book.get("title", "Unknown"),
                 author=book.get("author"),
                 isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", [])
+                frame_ids=book.get("frame_ids", []),
+                copies=book.get("count")
             )
             user_books_store.put(lib_key, lib_book)
             
     if unshelved_books:
-        shelf_id = "Unshelved" 
+        shelf = "Unshelved" 
         
-        del_start = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id="")
-        del_end = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id="\uffff")
+        del_start = LibraryBookKey(user_id, library_id, shelf, "")
+        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
         user_books_store.delete_range(del_start, del_end)
 
         for book in unshelved_books:
@@ -503,13 +516,14 @@ async def complete_upload(
                 author = book.get("author", "").lower().strip()
                 book_id = f"{title}|{author}"
 
-            lib_key = LibraryBookKey(user_id=user_id, library_id=library_id, shelf=shelf_id, book_id=book_id)
+            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
             lib_book = LibraryBook(
                 key=lib_key,
                 title=book.get("title", "Unknown"),
                 author=book.get("author"),
                 isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", [])
+                frame_ids=book.get("frame_ids", []),
+                copies=book.get("count")
             )
             user_books_store.put(lib_key, lib_book)
 
@@ -559,10 +573,6 @@ async def get_user_libraries(current_user: Dict[str, Any] = Depends(get_current_
     """
     user_id = current_user["uid"]
     # 1. Fetch all shelf metadata for user
-    # Range query from (user_id, 0) to (user_id, max_int)
-    # We use tuples directly since DocumentStore supports it
-    # Fetch all books for user
-    # Range query from (user_id, "", "") to (user_id, "\uffff", "\uffff")
     lib_rows = user_library_store.get_range(LibraryKey(user_id, ""), LibraryKey(user_id, "\uffff"))
     
     # 2. Group books by library_id
@@ -580,23 +590,18 @@ async def get_user_library(current_user: Dict[str, Any] = Depends(get_current_us
     """
     user_id = current_user["uid"]
     # 1. Fetch all shelf metadata for user
-    # Range query from (user_id, 0) to (user_id, max_int)
-    # We use tuples directly since DocumentStore supports it
-    # Fetch all books for user
-    # Range query from (user_id, "", "") to (user_id, "\uffff", "\uffff")
-    # Because sort key is now (libarary, shelf, book_id)
     from_library = library_id if library_id else ""
     to_library = library_id if library_id else "\uffff"
-    b_start = LibraryBookKey(user_id=user_id, library=from_library, shelf="", book_id="")
-    b_end = LibraryBookKey(user_id=user_id, library=to_library, shelf="\uffff", book_id="\uffff")
+    b_start = LibraryBookKey(user_id, from_library, "", "")
+    b_end = LibraryBookKey(user_id, to_library, "\uffff", "\uffff")
     
     book_rows = user_books_store.get_range(b_start, b_end)
     
     shelves: Dict[str, List[LibraryBook]] = {}
     unshelved: List[LibraryBook] = []
     
-    for _, book in book_rows:
-        s_name = book.library_id + ":" + book.shelf_id
+    for id, book in book_rows:
+        s_name = id.library_id + ":" + id.shelf
         if s_name == "Unshelved":
             unshelved.append(book)
         else:
