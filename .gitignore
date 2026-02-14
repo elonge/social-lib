@@ -42,3 +42,9 @@ yarn-error.log*
 next-env.d.ts
 books.zip
 server/gemini_video_output/
+server/shelf_images/
+
+# python
+__pycache__/
+*.pyc
+service-account.json

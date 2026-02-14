@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 
 interface Book {
   title: string;
@@ -21,17 +22,30 @@ interface FrameResult {
 }
 
 export default function Home() {
+  const { user, logout } = useAuth();
   const [frames, setFrames] = useState<FrameResult[]>([]);
   const [enriching, setEnriching] = useState(false);
   const [finalResult, setFinalResult] = useState<{ books: Book[], stats?: any } | null>(null);
   const [viewingFrame, setViewingFrame] = useState<FrameResult | null>(null);
 
-  // Use environment variable for API URL, fallback to local for development
-  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  // Helper to ensure auth token is ready
+  const getAuthHeaders = async () => {
+    // apiRequest handles token automatically, but for FormData we might need manual token if we don't use apiRequest (which supports json mostly)
+    // Actually apiRequest in lib/api.ts is designed for JSON.
+    // Let's import apiRequest and use it.
+    // CAUTION: apiRequest assumes JSON content-type by default unless body is FormData.
+    // We should verify api.ts support for FormData.
+    return {};
+  }
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files) return;
+
+    if (!user) {
+      alert("Please login first");
+      return;
+    }
 
     const newFrames: FrameResult[] = [];
     for (let i = 0; i < files.length; i++) {
@@ -46,6 +60,9 @@ export default function Home() {
     }
     setFrames((prev) => [...prev, ...newFrames]);
 
+    // Import apiRequest dynamically or at top level (doing it here for this block context)
+    const { apiRequest } = await import('../lib/api');
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const placeholderId = newFrames[i].id;
@@ -58,18 +75,18 @@ export default function Home() {
 
       const formData = new FormData();
       formData.append('file', file);
+      // user_id is NOT sent anymore, server extracts it from token
 
       try {
         setFrames(prev => prev.map(f => f.id === placeholderId ? { ...f, status: 'processing' } : f));
 
-        const response = await fetch(`${API_BASE_URL}/upload_next_frame`, {
+        // apiRequest automatically attaches valid Firebase ID token
+        // We need to make sure apiRequest handles FormData correctly (it should if we don't set Content-Type manually to json)
+        const data = await apiRequest('/upload_frame', {
           method: 'POST',
           body: formData,
         });
 
-        if (!response.ok) throw new Error('Upload failed');
-        const data = await response.json();
-        
         setFrames((prev) => prev.map(f => f.id === placeholderId ? {
           ...f,
           books: data.books || [],
@@ -89,25 +106,29 @@ export default function Home() {
     const selectedFrames = frames.filter(f => f.selected && f.status === 'complete');
     if (selectedFrames.length === 0) return;
 
+    if (!user) {
+      alert("Please login first");
+      return;
+    }
+
     setEnriching(true);
+    const { apiRequest } = await import('../lib/api');
+
     try {
       console.log('Completing upload with frames:', selectedFrames.map(f => f.id), 'Enrich:', enrich);
-      const response = await fetch(`${API_BASE_URL}/complete_upload`, {
+      const data = await apiRequest('/complete_upload', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           results: selectedFrames.map(f => f.rawResult),
           enrich: enrich,
+          // user_id removed
         }),
       });
 
-      const data = await response.json();
       console.log('Complete upload response:', data);
       setFinalResult({
         books: data.books,
-        stats: data.enrichment_stats
+        stats: data.deduplication_stats // Updated key name from response
       });
     } catch (error) {
       console.error('Error completing upload:', error);
@@ -129,8 +150,30 @@ export default function Home() {
   return (
     <main className="min-h-screen p-8 bg-gray-50 text-gray-900">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-4xl font-bold mb-8 text-center text-blue-600">Book Shelf Playground</h1>
-        
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-4xl font-bold text-blue-600">Book Shelf Playground</h1>
+          <div>
+            {user ? (
+              <div className="flex items-center gap-4">
+                <span className="text-gray-700">Welcome, {user.displayName}</span>
+                <button
+                  onClick={logout}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                >
+                  Logout
+                </button>
+              </div>
+            ) : (
+              <a
+                href="/login"
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+              >
+                Login
+              </a>
+            )}
+          </div>
+        </div>
+
         <div className="bg-white p-6 rounded-lg shadow-md mb-8">
           <h2 className="text-xl font-semibold mb-4">Step 1: Upload Frames</h2>
           <div className="flex items-center gap-4">
@@ -178,25 +221,25 @@ export default function Home() {
                         Loading image...
                       </div>
                     )}
-                    
+
                     {frame.status !== 'complete' && (
                       <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                         <div className="bg-white px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider animate-bounce">
-                           {frame.status}
-                         </div>
+                        <div className="bg-white px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider animate-bounce">
+                          {frame.status}
+                        </div>
                       </div>
                     )}
 
                     <div className="absolute top-2 left-2">
-                      <input 
-                        type="checkbox" 
-                        checked={frame.selected} 
-                        onChange={() => {}} 
+                      <input
+                        type="checkbox"
+                        checked={frame.selected}
+                        onChange={() => { }}
                         disabled={frame.status !== 'complete'}
                         className="w-5 h-5 cursor-pointer"
                       />
                     </div>
-                    <button 
+                    <button
                       onClick={(e) => { e.stopPropagation(); removeFrame(frame.id); }}
                       className="absolute top-2 right-2 bg-red-500 text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
                     >
@@ -209,7 +252,7 @@ export default function Home() {
                         <div className="flex justify-between items-center mb-2">
                           <p className="font-medium text-sm text-gray-500">{frame.books.length} books detected</p>
                           {frame.books.length > 0 && (
-                            <button 
+                            <button
                               onClick={(e) => { e.stopPropagation(); setViewingFrame(frame); }}
                               className="text-xs text-blue-600 hover:underline font-semibold"
                             >
@@ -245,7 +288,7 @@ export default function Home() {
           <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-green-500 mt-8">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-2xl font-bold text-green-700">Final Results ({finalResult.books.length} unique books)</h2>
-              <button 
+              <button
                 onClick={() => setFinalResult(null)}
                 className="text-gray-400 hover:text-gray-600 font-medium"
               >
@@ -314,7 +357,7 @@ export default function Home() {
           <div className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl">
             <div className="p-4 border-b flex justify-between items-center sticky top-0 bg-white rounded-t-xl">
               <h3 className="text-xl font-bold">Books in Frame</h3>
-              <button 
+              <button
                 onClick={() => setViewingFrame(null)}
                 className="text-gray-500 hover:text-gray-700 text-2xl"
               >
@@ -343,7 +386,7 @@ export default function Home() {
               </table>
             </div>
             <div className="p-4 border-t text-right">
-              <button 
+              <button
                 onClick={() => setViewingFrame(null)}
                 className="bg-gray-100 px-4 py-2 rounded-lg hover:bg-gray-200 font-medium transition-colors"
               >

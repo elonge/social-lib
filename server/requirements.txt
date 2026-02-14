@@ -2,6 +2,8 @@
 fastapi
 uvicorn
 python-multipart
+firebase-admin
+python-dotenv
 
 # Gemini Book Extractor dependencies (merged from requirements_gemini.txt)
 google-genai

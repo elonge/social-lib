@@ -40,11 +40,31 @@ If your key is in a specific env file:
 ENV_FILE=.env.local ./server/deploy_gcp.sh
 ```
 
-Optional overrides:
-
 ```bash
 PROJECT_ID=my-gcp-project REGION=us-central1 SERVICE_NAME=book-extractor-api ./server/deploy_gcp.sh
 ```
+
+## Team Setup & Secrets
+
+We use **Google Secret Manager** to share the `service-account.json`.
+
+1.  **Download the secret** (Run this to get the file locally):
+    ```bash
+    gcloud secrets versions access latest --secret="firebase-service-account" > server/service-account.json
+    ```
+
+## Production Deployment
+
+To deploy to the production project (`social-lib-487109`), run:
+
+```bash
+PROJECT_ID=social-lib-487109 ./server/deploy_gcp.sh
+```
+
+This script will:
+1.  Use your local `server/service-account.json` credentials.
+2.  Inject them securely into the Cloud Run container.
+3.  Deploy the service to the specified project.
 
 ## Learn More
 
@@ -55,8 +75,20 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## Frontend Setup
+
+The frontend needs Firebase configuration keys.
+
+1.  Copy the example env file:
+    ```bash
+    cp server/playground/.env.example server/playground/.env.local
+    ```
+2.  Edit `server/playground/.env.local` and fill in your Firebase keys (from Project Settings).
+
 ## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1.  Import this repo into Vercel.
+2.  Set the **Root Directory** to `server/playground`.
+3.  Go to **Settings > Environment Variables**.
+4.  Add all the keys from `server/playground/.env.example` (e.g., `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_API_URL`, etc.).
+    - Note: For `NEXT_PUBLIC_API_URL`, use your deployed backend URL (e.g., Cloud Run URL).

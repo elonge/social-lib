@@ -41,17 +41,41 @@ if [[ -z "${GOOGLE_API_KEY:-}" ]]; then
   exit 1
 fi
 
-if [[ -n "${PROJECT_ID}" ]]; then
-  gcloud run deploy "${SERVICE_NAME}" \
-    --source "${SERVER_DIR}" \
-    --region "${REGION}" \
-    --allow-unauthenticated \
-    --set-env-vars "GOOGLE_API_KEY=${GOOGLE_API_KEY}" \
-    --project "${PROJECT_ID}"
+# Check for service-account.json
+SERVICE_ACCOUNT_FILE="${SERVER_DIR}/service-account.json"
+SERVICE_ACCOUNT_JSON=""
+
+if [[ -f "${SERVICE_ACCOUNT_FILE}" ]]; then
+  echo "Found service-account.json, injecting as environment variable..."
+  # Minify JSON to single line
+  SERVICE_ACCOUNT_JSON=$(tr -d '\n' < "${SERVICE_ACCOUNT_FILE}")
 else
-  gcloud run deploy "${SERVICE_NAME}" \
-    --source "${SERVER_DIR}" \
-    --region "${REGION}" \
-    --allow-unauthenticated \
-    --set-env-vars "GOOGLE_API_KEY=${GOOGLE_API_KEY}"
+  echo "Warning: service-account.json not found in server directory."
+  echo "Deployment may fail if the server cannot authenticate with Firebase."
 fi
+
+DEPLOY_CMD="gcloud run deploy ${SERVICE_NAME} \
+  --source ${SERVER_DIR} \
+  --region ${REGION} \
+  --allow-unauthenticated \
+  --set-env-vars GOOGLE_API_KEY=${GOOGLE_API_KEY}"
+
+if [[ -n "${PROJECT_ID}" ]]; then
+  DEPLOY_CMD="${DEPLOY_CMD} --project ${PROJECT_ID}"
+fi
+
+if [[ -n "${SERVICE_ACCOUNT_JSON}" ]]; then
+  # Escape quotes for the command line is tricky, but gcloud accepts comma-separated key=value
+  # Since JSON contains commas, we should use a different separator or ensure it's quoted correctly.
+  # Actually, gcloud set-env-vars handles usage if passed individually.
+  # But simpler: Let's just append it.
+  
+  # Note: extremely long env vars can be an issue, but standard service accounts are small (~2KB).
+  # We use --set-env-vars 'KEY=VALUE' syntax.
+  
+  # We need to escape single quotes if they exist in JSON (usually they don't, JSON uses double quotes)
+  DEPLOY_CMD="${DEPLOY_CMD} --set-env-vars FIREBASE_SERVICE_ACCOUNT_JSON='${SERVICE_ACCOUNT_JSON}'"
+fi
+
+echo "Deploying to Cloud Run..."
+eval "${DEPLOY_CMD}"

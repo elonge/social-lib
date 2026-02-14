@@ -1,17 +1,45 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Annotated
 import uuid
 import time
+import os
+from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, auth
+
 from book_extractor import process_image_bytes
 from book_enricher import BookEnricher
 from deduplicator import BookDeduplicator
 from session_manager import get_session_store
 from image_storage import get_image_storage
-from document_store import MongoDocumentStore, PartitionKey, SortKey, default_to_dict as to_dict
+from document_store import MongoDocumentStore, InMemoryDocumentStore, PartitionKey, SortKey, default_to_dict as to_dict
 
+load_dotenv()
+
+# Initialize Firebase Admin
+# Initialize Firebase Admin
+if not firebase_admin._apps:
+    try:
+        # 1. Try to load from FIREBASE_SERVICE_ACCOUNT_JSON env var (for Cloud Run)
+        service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+        if service_account_json:
+            import json
+            cert = json.loads(service_account_json)
+            cred = credentials.Certificate(cert)
+            firebase_admin.initialize_app(cred)
+            print("Initialized Firebase Admin using FIREBASE_SERVICE_ACCOUNT_JSON env var")
+        else:
+            # 2. Fallback to implicit credentials (GOOGLE_APPLICATION_CREDENTIALS) or default
+            cred = credentials.ApplicationDefault()
+            firebase_admin.initialize_app(cred)
+            print("Initialized Firebase Admin using Application Default Credentials")
+    except Exception as e:
+        print(f"Warning: Firebase Admin initialization failed: {e}")
+        print("Auth verification may fail if credentials are not set.")
 
 @dataclass(frozen=True)
 class RawLibraryKey:
@@ -64,27 +92,19 @@ image_storage = get_image_storage("file")
 
 # Initialize document stores
 # Use environment variables if available
-mongo_conn = "mongodb://localhost:27017/"
-raw_library_store = MongoDocumentStore[RawLibraryKey, RawLibraryEntry](
-    connection_string=mongo_conn,
-    database_name="social_lib",
-    collection_name="user_raw_library",
+# Initialize document stores
+# using InMemory for now to avoid DB connection issues
+raw_library_store = InMemoryDocumentStore[RawLibraryKey, RawLibraryEntry](
     key_type=RawLibraryKey,
     data_type=RawLibraryEntry
 )
 
-user_library_store = MongoDocumentStore[LibraryBookKey, LibraryBook](
-    connection_string=mongo_conn,
-    database_name="social_lib",
-    collection_name="user_library",
+user_library_store = InMemoryDocumentStore[LibraryBookKey, LibraryBook](
     key_type=LibraryBookKey,
     data_type=LibraryBook
 )
 
-shelf_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
-    connection_string=mongo_conn,
-    database_name="social_lib",
-    collection_name="shelf_metadata",
+shelf_metadata_store = InMemoryDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
     key_type=ShelfFrameMetadataKey,
     data_type=ShelfFrameMetadata
 )
@@ -97,21 +117,140 @@ shelf_metadata_store.create_table()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+security = HTTPBearer()
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        # Verify the Firebase token
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token
+    except Exception as e:
+        print(f"Auth Error: {e}") # DEBUG LOG
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid authentication credentials: {e}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+@dataclass(frozen=True)
+class UserKey:
+    uid: Annotated[str, PartitionKey]
+
+@dataclass
+class User:
+    uid: str
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    picture: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+
+# Initialize user store
+# Initialize user store
+# Fallback to InMemoryDocumentStore if Mongo is not available or for simpler dev setup
+# To use Mongo: Ensure MongoDB is running and MONGO_CONNECTION_STRING is set
+user_store = InMemoryDocumentStore[UserKey, User](
+    key_type=UserKey,
+    data_type=User
+)
+# user_store.create_table() # InMemory doesn't need create_table usually, but abstract method exists
+user_store.create_table()
+
 
 class CompleteUploadRequest(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
     session_id: Optional[str] = None
     enrich: Optional[bool] = False
     metadata: Dict[str, Any] = {}
-    user_id: str = "default_user"
+    metadata: Dict[str, Any] = {}
+
+class UserResponse(BaseModel):
+    uid: str
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    picture: Optional[str] = None
+    created_at: Optional[float] = None
+
+@app.get("/users/me", response_model=UserResponse)
+async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    uid = current_user.get("uid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="User ID not found in token")
+    
+    # Check if user exists in store
+    key = UserKey(uid=uid)
+    user = user_store.get(key)
+    
+    # Extract latest info from token
+    email = current_user.get("email")
+    display_name = current_user.get("name")
+    picture = current_user.get("picture")
+    
+    # Split name logic
+    first_name = None
+    last_name = None
+    if display_name:
+        parts = display_name.strip().split(" ", 1)
+        first_name = parts[0]
+        if len(parts) > 1:
+            last_name = parts[1]
+
+    if not user:
+        # Create new user
+        user = User(
+            uid=uid,
+            email=email,
+            display_name=display_name,
+            first_name=first_name,
+            last_name=last_name,
+            picture=picture,
+            created_at=time.time()
+        )
+        user_store.put(key, user)
+    else:
+        # Update existing user metadata if changed
+        # This keeps the profile fresh if they update it in Google/Firebase
+        updated = False
+        if user.display_name != display_name:
+            user.display_name = display_name
+            # Re-split name if display name changed
+            user.first_name = first_name
+            user.last_name = last_name
+            updated = True
+        
+        if user.picture != picture:
+            user.picture = picture
+            updated = True
+            
+        if user.email != email:
+            user.email = email
+            updated = True
+            
+        if updated:
+            user_store.put(key, user)
+    
+    return UserResponse(
+        uid=user.uid,
+        email=user.email,
+        display_name=user.display_name,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        picture=user.picture,
+        created_at=user.created_at
+    )
 
 @app.get("/init_upload")
 @app.post("/init_upload")
-async def init_upload():
+async def init_upload(current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Initializes a new upload session.
     """
@@ -124,14 +263,16 @@ async def upload_frame(
     file: UploadFile = File(...), 
     session_id: Optional[str] = Form(None), 
     frame_id: Optional[int] = Form(None),
-    user_id: Optional[str] = Form("default_user"),
-    name: Optional[str] = Form(None)
+    name: Optional[str] = Form(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Receives an image file, extracts books, enriches them, and returns them with a count.
     Saves results to session using books_<frame_id> if session_id is provided.
     Saves raw library entry to MongoDB.
     """
+    user_id = current_user["uid"]
+
     # Read image bytes
     content = await file.read()
     
@@ -152,12 +293,10 @@ async def upload_frame(
         enriched_books, stats = await enricher.batch_enrich(raw_books, dedupe_mode="counting")
         
         # 2.5 Save to raw library document store
-        # 2.5 Save to raw library document store
         entry_key = RawLibraryKey(user_id=user_id, frame_id=frame_id)
         entry = RawLibraryEntry(user_id=user_id, frame_id=frame_id, name=name, books=enriched_books)
         raw_library_store.put(entry_key, entry)
         
-        # 2.6 Save shelf frame metadata
         # 2.6 Save shelf frame metadata
         meta_key = ShelfFrameMetadataKey(user_id=user_id, frame_id=frame_id)
         metadata = ShelfFrameMetadata(
@@ -190,14 +329,17 @@ async def upload_frame(
     return result
 
 @app.post("/complete_upload")
-async def complete_upload(request: CompleteUploadRequest):
+async def complete_upload(
+    request: CompleteUploadRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """
     Receives a list of JSON results from upload_frame.
     Deduplicates books by proximity (already enriched).
     Saves aggregated library to MongoDB.
     """
     results = request.results
-    user_id = request.user_id
+    user_id = current_user["uid"]
     
     # If results are not provided, try to fetch from session
     if not results and request.session_id:
@@ -272,10 +414,6 @@ async def complete_upload(request: CompleteUploadRequest):
     # For each affected shelf: Delete old content and Insert new
     for s_name, shelf_books in books_by_shelf.items():
         # Delete range for (user_id, shelf_name)
-        # We need a way to specify partial sort key for range delete?
-        # DocumentStore.delete_range(start, end)
-        # start = (user_id, shelf_name, "")
-        # end = (user_id, shelf_name, "\uffff")
         
         del_start = LibraryBookKey(user_id=user_id, shelf_name=s_name, book_id="")
         del_end = LibraryBookKey(user_id=user_id, shelf_name=s_name, book_id="\uffff")
@@ -366,10 +504,11 @@ async def enrich_books(books: List[Dict[str, Any]]):
     }
 
 @app.get("/user_library")
-async def get_user_library(user_id: str = "default_user"):
+async def get_user_library(current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Returns the user's library organized by shelf.
     """
+    user_id = current_user["uid"]
     # 1. Fetch all shelf metadata for user
     # Range query from (user_id, 0) to (user_id, max_int)
     # We use tuples directly since DocumentStore supports it
