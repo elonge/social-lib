@@ -36,15 +36,41 @@ class SortKey:
     """Marker for sort key members with optional ordering."""
     order: int = 0
 
+@dataclass
+class CopyOfKey:
+    """Marker for fields that are copies of the key and should not be serialized."""
+    pass
+
 K = TypeVar('K')
 V = TypeVar('V')
 
 def default_to_dict(obj: Any) -> Dict[str, Any]:
     """
     Very simple reflection helper to convert an object to a dict.
+    Excludes fields annotated with CopyOfKey.
     """
     if hasattr(obj, "__dict__"):
-        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+        result = {}
+        # Check for CopyOfKey annotations
+        try:
+            hints = get_type_hints(type(obj), include_extras=True)
+            copy_of_key_fields = set()
+            for name, hint in hints.items():
+                if get_origin(hint) is Annotated:
+                    metadata = get_args(hint)[1:]
+                    for m in metadata:
+                        if m is CopyOfKey or isinstance(m, CopyOfKey):
+                            copy_of_key_fields.add(name)
+                            break
+            
+            # Build dict excluding CopyOfKey fields and private fields
+            for k, v in obj.__dict__.items():
+                if not k.startswith("_") and k not in copy_of_key_fields:
+                    result[k] = v
+            return result
+        except Exception:
+            # Fallback to simple filtering if type hints fail
+            return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
     if isinstance(obj, dict):
         return obj
     return {"value": obj}
@@ -183,16 +209,63 @@ class DocumentStore(Generic[K, V], ABC):
 
     def _to_data_dict(self, obj: V) -> Dict[str, Any]:
         return self._to_dict_fn(obj)
+    
+    def _get_copy_of_key_field(self) -> Optional[str]:
+        """Returns the name of the field annotated with CopyOfKey, if any."""
+        if not self.data_type:
+            return None
+        
+        try:
+            hints = get_type_hints(self.data_type, include_extras=True)
+            for name, hint in hints.items():
+                if get_origin(hint) is Annotated:
+                    metadata = get_args(hint)[1:]
+                    for m in metadata:
+                        if m is CopyOfKey or isinstance(m, CopyOfKey):
+                            return name
+        except Exception:
+            pass
+        return None
+    
+    def _populate_copy_of_key_field(self, obj: V, key: K) -> V:
+        """Populates the CopyOfKey field on obj with the given key, if such a field exists."""
+        copy_of_key_field = self._get_copy_of_key_field()
+        if copy_of_key_field and hasattr(obj, copy_of_key_field):
+            # Set the field - works for both dataclasses and regular classes
+            try:
+                object.__setattr__(obj, copy_of_key_field, key)
+            except Exception:
+                pass
+        return obj
 
-    def _from_data_dict(self, data: Dict[str, Any]) -> V:
+    def _from_data_dict(self, data: Dict[str, Any], key: Optional[K] = None) -> V:
+        """
+        Convert dict to V object. If key is provided and V has a CopyOfKey field,
+        populate it with the key.
+        """
+        obj: V
         if self._from_dict_fn:
-            return self._from_dict_fn(data)
-        if self.data_type:
+            obj = self._from_dict_fn(data)
+        elif self.data_type:
+             # If there's a CopyOfKey field, add it to data for instantiation
+             copy_of_key_field = self._get_copy_of_key_field()
+             data_for_init = data.copy()
+             if copy_of_key_field and copy_of_key_field not in data_for_init:
+                 data_for_init[copy_of_key_field] = None
+             
              try:
-                 return self.data_type(**data)
-             except Exception:
-                 pass
-        return data  # type: ignore
+                 obj = self.data_type(**data_for_init)
+             except Exception as e:
+                 # If instantiation fails, return the dict as fallback
+                 obj = data  # type: ignore
+        else:
+            obj = data  # type: ignore
+        
+        # Populate CopyOfKey field with actual key if provided
+        if key is not None and not isinstance(obj, dict):
+            obj = self._populate_copy_of_key_field(obj, key)
+        
+        return obj
 
     @abstractmethod
     def put(self, key: K, data: V, params: Optional[PutParams] = None):
@@ -267,7 +340,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
     def get(self, key: K, params: Optional[GetParams] = None) -> Optional[V]:
         key_tuple = self._get_key_tuple(key)
         data = self._storage.get(key_tuple)
-        return self._from_data_dict(data) if data is not None else None
+        return self._from_data_dict(data, key) if data is not None else None
 
     def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
         results = {}
@@ -285,7 +358,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
         for k_tuple in sorted(self._storage.keys(), reverse=params.reverse if params else False):
             if s_tuple <= k_tuple <= e_tuple:
                 k = self._reconstruct_key(k_tuple)
-                results.append((k, self._from_data_dict(self._storage[k_tuple]))) # type: ignore
+                results.append((k, self._from_data_dict(self._storage[k_tuple], k))) # type: ignore
         return results
 
     def get_range_iterator(self, start_key: K, end_key: K, params: Optional[GetParams] = None):
@@ -304,7 +377,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
         results = []
         for data_dict in self._storage.values():
             if self._match_index(data_dict, idx_tuple, idx_attrs):
-                results.append(self._from_data_dict(data_dict))
+                results.append(self._from_data_dict(data_dict, None))
         return results
 
     def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
@@ -317,7 +390,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
             obj_vals = tuple(data_dict.get(a) for a in idx_attrs)
             
             if s_tuple <= obj_vals <= e_tuple:
-                all_matches.append((obj_vals, self._from_data_dict(data_dict)))
+                all_matches.append((obj_vals, self._from_data_dict(data_dict, None)))
         
         # Sort by the index key structure
         all_matches.sort(key=lambda x: x[0], reverse=params.reverse if params else False)
@@ -402,7 +475,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
     def get(self, key: K, params: Optional[GetParams] = None) -> Optional[V]:
         query = self._key_to_mongo_query(key)
         doc = self.collection.find_one(query)
-        return self._from_data_dict(doc["data"]) if doc else None
+        return self._from_data_dict(doc["data"], key) if doc else None
 
     def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
         # Map key_tuple -> original key
@@ -438,10 +511,10 @@ class MongoDocumentStore(DocumentStore[K, V]):
                  
             original_k = key_map.get(vals)
             if original_k:
-                results[original_k] = self._from_data_dict(doc["data"])
+                results[original_k] = self._from_data_dict(doc["data"], original_k)
             else:
                 k = self._reconstruct_key(vals)
-                results[k] = self._from_data_dict(doc["data"])
+                results[k] = self._from_data_dict(doc["data"], k)
         return results
 
     def get_range(self, start_key: K, end_key: K, params: Optional[GetParams] = None) -> List[Tuple[K, V]]:
@@ -466,7 +539,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
                  vals = (_id,)
 
             k = self._reconstruct_key(vals)
-            results.append((k, self._from_data_dict(doc["data"])))
+            results.append((k, self._from_data_dict(doc["data"], k)))
         return results
 
     def _get_range_cursor(self, start_key: K, end_key: K, params: Optional[GetParams] = None):
@@ -501,7 +574,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
                  vals = (_id,)
 
             k = self._reconstruct_key(vals)
-            yield (k, self._from_data_dict(doc["data"]))
+            yield (k, self._from_data_dict(doc["data"], k))
 
     def _index_to_mongo_query(self, vals: Tuple[Any, ...], attrs: List[str]) -> Dict[str, Any]:
         query = {}
@@ -515,7 +588,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
         query = self._index_to_mongo_query(vals, all_a)
         # In a real app we'd want an index for sorting too
         cursor = self.collection.find(query)
-        return [self._from_data_dict(doc["data"]) for doc in cursor]
+        return [self._from_data_dict(doc["data"], None) for doc in cursor]
 
     def _get_index_range_cursor(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
         attrs, _, _ = self._discover_attrs_for(type(start_index))
@@ -534,7 +607,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
         for doc in cursor:
             obj_vals = tuple(doc["data"].get(a) for a in attrs)
             if s_vals <= obj_vals <= e_vals:
-                results.append(self._from_data_dict(doc["data"]))
+                results.append(self._from_data_dict(doc["data"], None))
         return results
 
     def get_index_range_iterator(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
@@ -542,7 +615,7 @@ class MongoDocumentStore(DocumentStore[K, V]):
         for doc in cursor:
             obj_vals = tuple(doc["data"].get(a) for a in attrs)
             if s_vals <= obj_vals <= e_vals:
-                yield self._from_data_dict(doc["data"])
+                yield self._from_data_dict(doc["data"], None)
 
     def delete(self, key: K, params: Optional[DeleteParams] = None):
         query = self._key_to_mongo_query(key)
@@ -649,7 +722,7 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
         doc = self.collection.find_one(query, {"items.$": 1})
         
         if doc and "items" in doc and doc["items"]:
-            return self._from_data_dict(doc["items"][0]["d"])
+            return self._from_data_dict(doc["items"][0]["d"], key)
         return None
 
     def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
@@ -707,7 +780,7 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
                      full_tuple = pk_tuple + sk_tuple
                      
                      k = self._reconstruct_key(full_tuple)
-                     items.append((k, self._from_data_dict(item["d"])))
+                     items.append((k, self._from_data_dict(item["d"], k)))
                  except Exception:
                      continue
         
@@ -750,7 +823,7 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
                             match = False
                             break
                     if match:
-                        results.append(self._from_data_dict(data))
+                        results.append(self._from_data_dict(data, None))
         return results
 
     def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
@@ -779,7 +852,7 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
                     obj_vals = tuple(data.get(a) for a in idx_attrs)
                     
                     if s_vals <= obj_vals <= e_vals:
-                         results.append((obj_vals, self._from_data_dict(data)))
+                         results.append((obj_vals, self._from_data_dict(data, None)))
 
         # Sort by index tuple
         results.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
@@ -802,13 +875,11 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
         query = pk_query.copy()
         query["items.sk"] = sk_val
         
-        print(f"DEBUG: get key={key} query={query}")
         # Project only the matching item
         doc = self.collection.find_one(query, {"items.$": 1})
-        print(f"DEBUG: get doc={doc}")
         
         if doc and "items" in doc and doc["items"]:
-            return self._from_data_dict(doc["items"][0]["d"])
+            return self._from_data_dict(doc["items"][0]["d"], key)
         return None
 
     def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
@@ -821,19 +892,17 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
 
     def get_range(self, start_key: K, end_key: K, params: Optional[GetParams] = None) -> List[Tuple[K, V]]:
         pk_query = self._key_to_mongo_pk_query(start_key)
-        print(f"DEBUG: get_range start_key={start_key} pk_query={pk_query}")
         
         doc = self.collection.find_one(pk_query)
         if not doc or "items" not in doc:
-             print("DEBUG: get_range doc not found or no items")
              return []
         
-        start_sk = self._get_sort_key_value(start_key)
-        end_sk = self._get_sort_key_value(end_key)
+        start_sk = self._get_sort_key_tuple(start_key)
+        end_sk = self._get_sort_key_tuple(end_key)
         
         items = []
         for item in doc["items"]:
-            sk = item["sk"]
+            sk = self._get_sort_key_tuple(item["sk"])
             
             # Simple comparison for now. 
             # Note: This assumes sk structure is comparable and consistent with range queries.
@@ -868,18 +937,19 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
                      full_tuple = pk_tuple + sk_tuple
                      
                      k = self._reconstruct_key(full_tuple)
-                     items.append((k, self._from_data_dict(item["d"])))
+                     items.append((k, self._from_data_dict(item["d"], k)))
                  except Exception:
                      continue
         
-        # Sort in memory
+        # Sort in memory by sort key tuple (guaranteed comparable)
         try:
-             # Sort by the key object itself if comparable, or try to sort by SK value?
-             # If K is a dataclass(frozen=True), it is orderable if order=True.
-             # We assume K is orderable.
-             items.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
-        except Exception:
-             pass
+             items.sort(key=lambda x: self._get_sort_key_tuple(x[0]), reverse=params.reverse if params else False)
+        except Exception as e:
+             # Fallback: try sorting by the full key
+             try:
+                 items.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
+             except Exception:
+                 pass
 
         return items
 
@@ -887,15 +957,6 @@ class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
         items = self.get_range(start_key, end_key, params)
         for item in items:
             yield item
-
-    def get_by_index(self, index_key: Any, params: Optional[GetParams] = None) -> List[V]:
-        return []
-
-    def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
-        return []
-
-    def get_index_range_iterator(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
-        yield from []
 
     def delete(self, key: K, params: Optional[DeleteParams] = None):
         pk_query = self._key_to_mongo_pk_query(key)

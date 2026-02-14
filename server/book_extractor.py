@@ -41,13 +41,8 @@ class GeminiBookExtractor:
         else:
             # Get API key from parameter or environment
             self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
-            if not self.api_key:
-                raise ValueError(
-                    "Google API key required. Set GOOGLE_API_KEY environment variable "
-                    "or pass api_key parameter."
-                )
             # Initialize client with Gemini AI Studio configuration
-            self.client = genai.Client(api_key=self.api_key)
+            self.client = genai.Client(api_key=self.api_key) if self.api_key else genai.Client()
             print("Initialized Gemini AI Studio client")
         
         # Initialize model and rescale settings

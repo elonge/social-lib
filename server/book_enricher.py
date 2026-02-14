@@ -12,7 +12,7 @@ class BookEnricher:
     
     def __init__(self, api_key: str = None, model_name: str = "gemini-3-flash-preview"):
         self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
-        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
+        self.client = genai.Client(api_key=self.api_key) if self.api_key else genai.Client()
         self.model_name = model_name
 
     async def enrich_book(self, book_data: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
