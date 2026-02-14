@@ -50,20 +50,28 @@ class DocumentStore(Generic[K, V], ABC):
     def __init__(
         self, 
         key_attrs: Optional[List[str]] = None,
+        partition_attrs: Optional[List[str]] = None,
+        sort_attrs: Optional[List[str]] = None,
         key_type: Optional[type] = None,
+        data_type: Optional[type] = None,
         to_dict_fn: Callable[[V], Dict[str, Any]] = default_to_dict,
         from_dict_fn: Optional[Callable[[Dict[str, Any]], V]] = None
     ):
         self._key_attrs = key_attrs
+        self._partition_attrs = partition_attrs
+        self._sort_attrs = sort_attrs
         self.key_type = key_type
+        self.data_type = data_type
         self._to_dict_fn = to_dict_fn
         self._from_dict_fn = from_dict_fn
 
-    def _discover_attrs_for(self, cls: type) -> List[str]:
+    def _discover_attrs_for(self, cls: type) -> Tuple[List[str], List[str], List[str]]:
         """
         Discovers partition and sort attributes for any class, respecting specified order.
+        Returns (all_attrs, partition_attrs, sort_attrs)
         """
-        attrs = []
+        p_attrs = []
+        s_attrs = []
         try:
             hints = get_type_hints(cls, include_extras=True)
             for name, hint in hints.items():
@@ -72,24 +80,32 @@ class DocumentStore(Generic[K, V], ABC):
                     for m in metadata:
                         if m is PartitionKey or isinstance(m, PartitionKey):
                             order = m.order if isinstance(m, PartitionKey) else 0
-                            attrs.append((order, name))
+                            p_attrs.append((order, name))
                         if m is SortKey or isinstance(m, SortKey):
                             order = m.order if isinstance(m, SortKey) else 0
-                            attrs.append((order, name))
+                            s_attrs.append((order, name))
         except Exception as e:
             print(f"Warning: Failed to discover attributes for {cls}: {e}")
         
         # Sort by order, then by name (stable sort)
-        attrs.sort(key=lambda x: x[0])
+        p_attrs.sort(key=lambda x: x[0])
+        s_attrs.sort(key=lambda x: x[0])
         
-        return [a[1] for a in attrs]
+        partition_names = [a[1] for a in p_attrs]
+        sort_names = [a[1] for a in s_attrs]
+        all_names = partition_names + sort_names
+        
+        return all_names, partition_names, sort_names
 
     def _discover_attrs(self, cls: type):
         """
         Discovers key attributes by looking at class annotations for K.
         """
         if not self._key_attrs:
-            self._key_attrs = self._discover_attrs_for(cls)
+            all_a, p_a, s_a = self._discover_attrs_for(cls)
+            self._key_attrs = all_a
+            self._partition_attrs = p_a
+            self._sort_attrs = s_a
 
     def _get_key_tuple(self, obj: Any, attrs: Optional[List[str]] = None) -> Tuple[Any, ...]:
         # If attrs are not provided, use instance defaults
@@ -102,8 +118,8 @@ class DocumentStore(Generic[K, V], ABC):
                  return obj if isinstance(obj, tuple) else (obj,)
             
             # Try discovery
-            discovered = self._discover_attrs_for(type(obj))
-            key_attrs = key_attrs if key_attrs else discovered
+            all_a, p_a, s_a = self._discover_attrs_for(type(obj))
+            key_attrs = key_attrs if key_attrs else all_a
             
         # Safe defaults
         key_attrs = key_attrs or []
@@ -114,6 +130,26 @@ class DocumentStore(Generic[K, V], ABC):
         d = default_to_dict(obj) if not isinstance(obj, dict) else obj
         
         return tuple(d.get(attr) for attr in key_attrs)
+
+    def _get_partition_key_tuple(self, obj: Any) -> Tuple[Any, ...]:
+        if not self._partition_attrs:
+            self._discover_attrs(type(obj))
+            
+        if self._partition_attrs:
+             return self._get_key_tuple(obj, self._partition_attrs)
+        
+        # Fallback if no specific partition attrs: treat whole key as partition?
+        # Or if generic tuple, first element? 
+        # For MongoEmbedded, we really expect partition attrs definition or usage of Key class.
+        return self._get_key_tuple(obj)
+
+    def _get_sort_key_tuple(self, obj: Any) -> Tuple[Any, ...]:
+        if not self._sort_attrs:
+            self._discover_attrs(type(obj)) # Ensure discovered
+            
+        if self._sort_attrs:
+             return self._get_key_tuple(obj, self._sort_attrs)
+        return ()
     
     def _reconstruct_key(self, values: Tuple[Any, ...]) -> K:
         # If we have a key_type, try to populate it
@@ -148,6 +184,11 @@ class DocumentStore(Generic[K, V], ABC):
     def _from_data_dict(self, data: Dict[str, Any]) -> V:
         if self._from_dict_fn:
             return self._from_dict_fn(data)
+        if self.data_type:
+             try:
+                 return self.data_type(**data)
+             except Exception:
+                 pass
         return data  # type: ignore
 
     @abstractmethod
@@ -255,7 +296,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
         return obj_vals == target_tuple
 
     def get_by_index(self, index_key: Any, params: Optional[GetParams] = None) -> List[V]:
-        idx_attrs = self._discover_attrs_for(type(index_key))
+        idx_attrs, _, _ = self._discover_attrs_for(type(index_key))
         idx_tuple = self._get_key_tuple(index_key, idx_attrs)
         results = []
         for data_dict in self._storage.values():
@@ -264,7 +305,7 @@ class InMemoryDocumentStore(DocumentStore[K, V]):
         return results
 
     def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
-        idx_attrs = self._discover_attrs_for(type(start_index))
+        idx_attrs, _, _ = self._discover_attrs_for(type(start_index))
         s_tuple = self._get_key_tuple(start_index, idx_attrs)
         e_tuple = self._get_key_tuple(end_index, idx_attrs)
         
@@ -467,15 +508,15 @@ class MongoDocumentStore(DocumentStore[K, V]):
         return query
 
     def get_by_index(self, index_key: Any, params: Optional[GetParams] = None) -> List[V]:
-        attrs = self._discover_attrs_for(type(index_key))
-        vals = self._get_key_tuple(index_key, attrs)
-        query = self._index_to_mongo_query(vals, attrs)
+        all_a, _, _ = self._discover_attrs_for(type(index_key))
+        vals = self._get_key_tuple(index_key, all_a)
+        query = self._index_to_mongo_query(vals, all_a)
         # In a real app we'd want an index for sorting too
         cursor = self.collection.find(query)
         return [self._from_data_dict(doc["data"]) for doc in cursor]
 
     def _get_index_range_cursor(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
-        attrs = self._discover_attrs_for(type(start_index))
+        attrs, _, _ = self._discover_attrs_for(type(start_index))
         s_vals = self._get_key_tuple(start_index, attrs)
         e_vals = self._get_key_tuple(end_index, attrs)
         
@@ -520,6 +561,368 @@ class MongoDocumentStore(DocumentStore[K, V]):
     def create_table(self):
         # In MongoDB, collection is implicitly created on first insert,
         # but we can explicitly create it if needed.
+        if self.collection_name not in self.db.list_collection_names():
+            self.db.create_collection(self.collection_name)
+
+    def drop_table(self):
+        self.collection.drop()
+
+    def close(self):
+        if hasattr(self, 'client'):
+            self.client.close()
+
+
+class MongoEmbeddedDocumentStore(DocumentStore[K, V]):
+    """
+    Stores data in a list 'items' within a document identified by partition key.
+    Each item in the list has 'sk' (sort key) and 'd' (data).
+    """
+    def __init__(self, connection_string: str, database_name: str, collection_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from pymongo import MongoClient
+        self.client = MongoClient(connection_string)
+        self.db = self.client[database_name]
+        self.collection = self.db[collection_name]
+        self.collection_name = collection_name
+
+    def _key_to_mongo_pk_query(self, key: K) -> Dict[str, Any]:
+        # Uses only partition key attributes for the document _id
+        if not self._partition_attrs:
+            self._discover_attrs(type(key))
+
+        vals = self._get_partition_key_tuple(key)
+        
+        # 1. Mapped attributes
+        if self._partition_attrs and len(self._partition_attrs) == len(vals):
+             return {"_id": {attr: val for attr, val in zip(self._partition_attrs, vals)}}
+        
+        # 2. Single generic value
+        if len(vals) == 1:
+             return {"_id": vals[0]}
+
+        # 3. Tuple wrapper
+        return {"_id": {"v": list(vals)}}
+
+    def _get_sort_key_value(self, key: K) -> Any:
+        vals = self._get_sort_key_tuple(key)
+        # Sort key storage format
+        if self._sort_attrs and len(self._sort_attrs) == len(vals):
+             return {attr: val for attr, val in zip(self._sort_attrs, vals)}
+        if len(vals) == 1:
+             return vals[0]
+        return {"v": list(vals)}
+
+    def put(self, key: K, data: V, params: Optional[PutParams] = None):
+        pk_query = self._key_to_mongo_pk_query(key)
+        sk_val = self._get_sort_key_value(key)
+        data_dict = self._to_data_dict(data)
+        
+        # Try to update existing item in list
+        # We match document by PK and item by SK
+        query = pk_query.copy()
+        query["items.sk"] = sk_val
+        
+        update = {"$set": {"items.$.d": data_dict}}
+        
+        result = self.collection.update_one(query, update)
+        
+        if result.matched_count == 0:
+            push_update = {
+                "$push": {"items": {"sk": sk_val, "d": data_dict}}
+            }
+            self.collection.update_one(pk_query, push_update, upsert=True)
+
+    def batch_put(self, items: Dict[K, V], params: Optional[PutParams] = None):
+        # Naive implementation loop
+        for k, v in items.items():
+            self.put(k, v, params)
+
+    def get(self, key: K, params: Optional[GetParams] = None) -> Optional[V]:
+        pk_query = self._key_to_mongo_pk_query(key)
+        sk_val = self._get_sort_key_value(key)
+        
+        query = pk_query.copy()
+        query["items.sk"] = sk_val
+        
+        # Project only the matching item
+        doc = self.collection.find_one(query, {"items.$": 1})
+        
+        if doc and "items" in doc and doc["items"]:
+            return self._from_data_dict(doc["items"][0]["d"])
+        return None
+
+    def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
+        results = {}
+        for k in keys:
+            val = self.get(k)
+            if val:
+                results[k] = val
+        return results
+
+    def get_range(self, start_key: K, end_key: K, params: Optional[GetParams] = None) -> List[Tuple[K, V]]:
+        pk_query = self._key_to_mongo_pk_query(start_key)
+        
+        doc = self.collection.find_one(pk_query)
+        if not doc or "items" not in doc:
+             return []
+        
+        start_sk = self._get_sort_key_value(start_key)
+        end_sk = self._get_sort_key_value(end_key)
+        
+        items = []
+        for item in doc["items"]:
+            sk = item["sk"]
+            
+            # Simple comparison for now. 
+            # Note: This assumes sk structure is comparable and consistent with range queries.
+            # Dict comparison in Python is okay if keys match order.
+            match = False
+            try:
+                if start_sk <= sk <= end_sk:
+                    match = True
+            except TypeError:
+                # Fallback or error if types differ
+                pass
+                
+            if match:
+                 try:
+                     # Reconstruct Full Key
+                     # Assuming Key construction takes ALL fields in order (PK then SK)
+                     
+                     pk_tuple = self._get_partition_key_tuple(start_key)
+                     
+                     if isinstance(sk, dict) and "v" in sk and isinstance(sk["v"], list):
+                         sk_tuple = tuple(sk["v"])
+                     elif isinstance(sk, dict):
+                         if self._sort_attrs:
+                             sk_tuple = tuple(sk.get(a) for a in self._sort_attrs)
+                         else:
+                             sk_tuple = tuple(sk.values())
+                     elif isinstance(sk, list):
+                         sk_tuple = tuple(sk)
+                     else:
+                         sk_tuple = (sk,)
+                         
+                     full_tuple = pk_tuple + sk_tuple
+                     
+                     k = self._reconstruct_key(full_tuple)
+                     items.append((k, self._from_data_dict(item["d"])))
+                 except Exception:
+                     continue
+        
+        # Sort in memory
+        try:
+             # Sort by the key object itself if comparable, or try to sort by SK value?
+             # If K is a dataclass(frozen=True), it is orderable if order=True.
+             # We assume K is orderable.
+             items.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
+        except Exception:
+             pass
+
+        return items
+
+    def get_range_iterator(self, start_key: K, end_key: K, params: Optional[GetParams] = None):
+        items = self.get_range(start_key, end_key, params)
+        for item in items:
+            yield item
+
+    def get_by_index(self, index_key: Any, params: Optional[GetParams] = None) -> List[V]:
+        idx_attrs, _, _ = self._discover_attrs_for(type(index_key))
+        vals = self._get_key_tuple(index_key, idx_attrs)
+        
+        # Query for documents containing matching items
+        query = {}
+        for i, attr in enumerate(idx_attrs):
+            query[f"items.d.{attr}"] = vals[i]
+            
+        cursor = self.collection.find(query)
+        
+        results = []
+        for doc in cursor:
+            if "items" in doc:
+                for item in doc["items"]:
+                    data = item["d"]
+                    # Check match in memory
+                    match = True
+                    for i, attr in enumerate(idx_attrs):
+                        if data.get(attr) != vals[i]:
+                            match = False
+                            break
+                    if match:
+                        results.append(self._from_data_dict(data))
+        return results
+
+    def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
+        idx_attrs, _, _ = self._discover_attrs_for(type(start_index))
+        s_vals = self._get_key_tuple(start_index, idx_attrs)
+        e_vals = self._get_key_tuple(end_index, idx_attrs)
+        
+        # MongoDB query to narrow down documents (optional optimization, but helps)
+        # We can range query on the first attribute of the index
+        first_attr = idx_attrs[0] if idx_attrs else None
+        query = {}
+        if first_attr:
+             query[f"items.d.{first_attr}"] = {
+                 "$gte": s_vals[0],
+                 "$lte": e_vals[0]
+             }
+        
+        cursor = self.collection.find(query)
+        
+        results = []
+        for doc in cursor:
+            if "items" in doc:
+                for item in doc["items"]:
+                    data = item["d"]
+                    # Construct value tuple for comparison
+                    obj_vals = tuple(data.get(a) for a in idx_attrs)
+                    
+                    if s_vals <= obj_vals <= e_vals:
+                         results.append((obj_vals, self._from_data_dict(data)))
+
+        # Sort by index tuple
+        results.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
+        return [r[1] for r in results]
+
+    def get_index_range_iterator(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
+        items = self.get_by_index_range(start_index, end_index, params)
+        for item in items:
+            yield item
+
+    def batch_put(self, items: Dict[K, V], params: Optional[PutParams] = None):
+        # Naive implementation loop
+        for k, v in items.items():
+            self.put(k, v, params)
+
+    def get(self, key: K, params: Optional[GetParams] = None) -> Optional[V]:
+        pk_query = self._key_to_mongo_pk_query(key)
+        sk_val = self._get_sort_key_value(key)
+        
+        query = pk_query.copy()
+        query["items.sk"] = sk_val
+        
+        print(f"DEBUG: get key={key} query={query}")
+        # Project only the matching item
+        doc = self.collection.find_one(query, {"items.$": 1})
+        print(f"DEBUG: get doc={doc}")
+        
+        if doc and "items" in doc and doc["items"]:
+            return self._from_data_dict(doc["items"][0]["d"])
+        return None
+
+    def batch_get(self, keys: Set[K], params: Optional[GetParams] = None) -> Dict[K, V]:
+        results = {}
+        for k in keys:
+            val = self.get(k)
+            if val:
+                results[k] = val
+        return results
+
+    def get_range(self, start_key: K, end_key: K, params: Optional[GetParams] = None) -> List[Tuple[K, V]]:
+        pk_query = self._key_to_mongo_pk_query(start_key)
+        print(f"DEBUG: get_range start_key={start_key} pk_query={pk_query}")
+        
+        doc = self.collection.find_one(pk_query)
+        if not doc or "items" not in doc:
+             print("DEBUG: get_range doc not found or no items")
+             return []
+        
+        start_sk = self._get_sort_key_value(start_key)
+        end_sk = self._get_sort_key_value(end_key)
+        
+        items = []
+        for item in doc["items"]:
+            sk = item["sk"]
+            
+            # Simple comparison for now. 
+            # Note: This assumes sk structure is comparable and consistent with range queries.
+            # Dict comparison in Python is okay if keys match order.
+            match = False
+            try:
+                if start_sk <= sk <= end_sk:
+                    match = True
+            except TypeError:
+                # Fallback or error if types differ
+                pass
+                
+            if match:
+                 try:
+                     # Reconstruct Full Key
+                     # Assuming Key construction takes ALL fields in order (PK then SK)
+                     
+                     pk_tuple = self._get_partition_key_tuple(start_key)
+                     
+                     if isinstance(sk, dict) and "v" in sk and isinstance(sk["v"], list):
+                         sk_tuple = tuple(sk["v"])
+                     elif isinstance(sk, dict):
+                         if self._sort_attrs:
+                             sk_tuple = tuple(sk.get(a) for a in self._sort_attrs)
+                         else:
+                             sk_tuple = tuple(sk.values())
+                     elif isinstance(sk, list):
+                         sk_tuple = tuple(sk)
+                     else:
+                         sk_tuple = (sk,)
+                         
+                     full_tuple = pk_tuple + sk_tuple
+                     
+                     k = self._reconstruct_key(full_tuple)
+                     items.append((k, self._from_data_dict(item["d"])))
+                 except Exception:
+                     continue
+        
+        # Sort in memory
+        try:
+             # Sort by the key object itself if comparable, or try to sort by SK value?
+             # If K is a dataclass(frozen=True), it is orderable if order=True.
+             # We assume K is orderable.
+             items.sort(key=lambda x: x[0], reverse=params.reverse if params else False) # type: ignore
+        except Exception:
+             pass
+
+        return items
+
+    def get_range_iterator(self, start_key: K, end_key: K, params: Optional[GetParams] = None):
+        items = self.get_range(start_key, end_key, params)
+        for item in items:
+            yield item
+
+    def get_by_index(self, index_key: Any, params: Optional[GetParams] = None) -> List[V]:
+        return []
+
+    def get_by_index_range(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None) -> List[V]:
+        return []
+
+    def get_index_range_iterator(self, start_index: Any, end_index: Any, params: Optional[GetParams] = None):
+        yield from []
+
+    def delete(self, key: K, params: Optional[DeleteParams] = None):
+        pk_query = self._key_to_mongo_pk_query(key)
+        sk_val = self._get_sort_key_value(key)
+        
+        update = {"$pull": {"items": {"sk": sk_val}}}
+        self.collection.update_one(pk_query, update)
+
+    def delete_range(self, start_key: K, end_key: K, params: Optional[DeleteParams] = None):
+        pk_query = self._key_to_mongo_pk_query(start_key)
+        start_sk = self._get_sort_key_value(start_key)
+        end_sk = self._get_sort_key_value(end_key)
+        
+        condition = {
+            "sk": {
+                "$gte": start_sk,
+                "$lte": end_sk
+            }
+        }
+        
+        update = {
+            "$pull": {
+                "items": condition
+            }
+        }
+        self.collection.update_one(pk_query, update)
+
+    def create_table(self):
         if self.collection_name not in self.db.list_collection_names():
             self.db.create_collection(self.collection_name)
 

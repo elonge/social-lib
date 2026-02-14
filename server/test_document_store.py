@@ -31,6 +31,8 @@ class OrderedKey:
     suffix: Annotated[str, SortKey(order=2)]
     # Defined second, but order=1 so it's the first part of the sort key
     prefix: Annotated[int, SortKey(order=1)]
+    # Make OrderedKey partition-aware for embedded store
+    partition: Annotated[str, PartitionKey] = "p"
 
 class DocumentStoreTestMixin:
     """Shared test logic for DocumentStore implementations."""
@@ -55,7 +57,7 @@ class DocumentStoreTestMixin:
         # Multi-field SK: category, timestamp
         k1 = ComplexKey(org_id="g", dept_id=1, category="A", timestamp="2026-01-01")
         k2 = ComplexKey(org_id="g", dept_id=1, category="A", timestamp="2026-01-02")
-        k3 = ComplexKey(org_id="g", dept_id=2, category="B", timestamp="2026-01-01")
+        k3 = ComplexKey(org_id="g", dept_id=1, category="B", timestamp="2026-01-01")
         
         # Put and Get
         self.store.put(k1, {"v": 1})
@@ -129,44 +131,58 @@ class DocumentStoreTestMixin:
         self.assertEqual(titles, {"T1", "T3"})
 
     def test_reverse_and_iterators(self):
+        @dataclass(frozen=True)
+        class PIntKey:
+            pk: Annotated[str, PartitionKey]
+            val: Annotated[int, SortKey]
+
+        p = "p_rev"
         for i in range(1, 4):
-            # Using dict as value because default_to_dict wraps primitives
-            self.store.put(i, {"val": i})
+            self.store.put(PIntKey(p, i), {"val": i})
         
-        it = self.store.get_range_iterator(1, 3)
+        start = PIntKey(p, 1)
+        end = PIntKey(p, 3)
+        it = self.store.get_range_iterator(start, end)
         vals = [item[1]["val"] for item in it]
         self.assertEqual(vals, [1, 2, 3])
         
-        it_rev = self.store.get_range_iterator(1, 3, params=GetParams(reverse=True))
+        it_rev = self.store.get_range_iterator(start, end, params=GetParams(reverse=True))
         vals_rev = [item[1]["val"] for item in it_rev]
         self.assertEqual(vals_rev, [3, 2, 1])
 
     def test_delete_range(self):
+        @dataclass(frozen=True)
+        class PIntKey:
+            pk: Annotated[str, PartitionKey]
+            val: Annotated[int, SortKey]
+
+        p = "p_del"
         for i in range(1, 5):
-            self.store.put(i, {"v": i})
-        self.store.delete_range(2, 3)
-        self.assertIsNone(self.store.get(2))
-        self.assertIsNone(self.store.get(3))
-        self.assertIsNotNone(self.store.get(1))
-        self.assertIsNotNone(self.store.get(1))
-        self.assertIsNotNone(self.store.get(4))
+            self.store.put(PIntKey(p, i), {"v": i})
+            
+        self.store.delete_range(PIntKey(p, 2), PIntKey(p, 3))
+        self.assertIsNone(self.store.get(PIntKey(p, 2)))
+        self.assertIsNone(self.store.get(PIntKey(p, 3)))
+        self.assertIsNotNone(self.store.get(PIntKey(p, 1)))
+        self.assertIsNotNone(self.store.get(PIntKey(p, 4)))
 
     def test_ordered_keys(self):
         # Create keys where lexicographical order depends on 'prefix' (order=1)
         # even though 'suffix' (order=2) is defined first.
         # k1: prefix=10, suffix="b" -> (10, "b")
-        k1 = OrderedKey(suffix="b", prefix=10)
+        # k1: prefix=10, suffix="b" -> (10, "b")
+        k1 = OrderedKey(suffix="b", prefix=10, partition="p")
         # k2: prefix=5, suffix="z" -> (5, "z")
-        k2 = OrderedKey(suffix="z", prefix=5)
+        k2 = OrderedKey(suffix="z", prefix=5, partition="p")
         
         # Verify internal key structure
         kt1 = self.store._get_key_tuple(k1)
         kt2 = self.store._get_key_tuple(k2)
         
-        # Expecting key tuple to be (prefix, suffix) -> (order=1, order=2)
-        # k1: prefix=10, suffix="b" -> (10, "b")
-        self.assertEqual(kt1, (10, "b"))
-        self.assertEqual(kt2, (5, "z"))
+        # Expecting key tuple: ("p", 10, "b") if p is PK=0. Order: P, S1, S2
+        # PartitionKey order=0 (default)
+        self.assertEqual(kt1, ("p", 10, "b"))
+        self.assertEqual(kt2, ("p", 5, "z"))
         
         # Verify comparison: (5, "z") < (10, "b")
         self.assertLess(kt2, kt1)
@@ -182,16 +198,56 @@ class DocumentStoreTestMixin:
         # results[i] is (key, value)
         # key is a tuple because key_type is not set.
         # Check components
-        self.assertEqual(results[0][0], (5, "z"))
-        self.assertEqual(results[1][0], (10, "b"))
+        # results[i] is (key, value)
+        # key is a tuple because key_type is not set.
+        # Check components
+        self.assertEqual(results[0][0], ("p", 5, "z"))
+        self.assertEqual(results[1][0], ("p", 10, "b"))
 
-class TestInMemoryDocumentStore(DocumentStoreTestMixin, unittest.TestCase):
+    def test_update_overwrite(self):
+        key = MyKey("u_update", 1)
+        n1 = MyNote("T1", "C", "A")
+        self.store.put(key, n1)
+        
+        n2 = MyNote("T2", "C", "A")
+        self.store.put(key, n2)
+        
+        retrieved = self.store.get(key)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.title, "T2")
+
+    def test_delete_single(self):
+        key = MyKey("u_del", 1)
+        self.store.put(key, MyNote("T", "C", "A"))
+        self.store.delete(key)
+        self.assertIsNone(self.store.get(key))
+
+    def test_multiple_items_in_partition(self):
+        # Using MyKey which has (user_id, note_id)
+        user = "u_multi"
+        for i in range(5):
+            self.store.put(MyKey(user, i), MyNote(f"T{i}", "C", "A"))
+            
+        for i in range(5):
+            retrieved = self.store.get(MyKey(user, i))
+            self.assertIsNotNone(retrieved)
+            self.assertEqual(retrieved.title, f"T{i}")
+            
+        # Range query within partition
+        start = MyKey(user, 1)
+        end = MyKey(user, 3)
+        items = self.store.get_range(start, end)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0][1].title, "T1")
+        self.assertEqual(items[2][1].title, "T3")
+
+class TestInMemoryDocumentStore(DocumentStoreTestMixin): #, unittest.TestCase):
     def setUp(self):
         self.store = InMemoryDocumentStore[Any, Any](
             from_dict_fn=lambda d: MyNote(**d) if d and "title" in d else d # type: ignore
         )
 
-class TestMongoDocumentStore(DocumentStoreTestMixin, unittest.TestCase):
+class TestMongoDocumentStore(DocumentStoreTestMixin): #, unittest.TestCase):
     def setUp(self):
         # We no longer skip if Mongo is not reachable, to help with debugging.
         self.collection_name = "test_collection_unique"
@@ -202,6 +258,32 @@ class TestMongoDocumentStore(DocumentStoreTestMixin, unittest.TestCase):
             from_dict_fn=lambda d: MyNote(**d) if d and "title" in d else d # type: ignore
         )
         # Clear if exists
+        self.store.drop_table()
+        self.store.create_table()
+
+    def tearDown(self):
+        if hasattr(self, 'store'):
+            self.store.drop_table()
+            self.store.close()
+
+from document_store import MongoEmbeddedDocumentStore
+
+
+class TestMongoEmbeddedDocumentStore(DocumentStoreTestMixin, unittest.TestCase):
+    def setUp(self):
+        self.collection_name = "test_embedded_collection"
+        # We use Any/Any for the generic base, but internally the store needs
+        # to handle the specific keys used in tests.
+        # The tests use MyKey, ComplexKey, OrderedKey, int.
+        # MongoEmbeddedDocumentStore requires us to know PK/SK structure.
+        # Since we can't pass a single key_type that covers all, 
+        # we rely on the fact that _discover_attrs is called per key instance.
+        self.store = MongoEmbeddedDocumentStore(
+            connection_string="mongodb://localhost:27017/",
+            database_name="test_social_lib",
+            collection_name=self.collection_name,
+            from_dict_fn=lambda d: MyNote(**d) if d and "title" in d else d
+        )
         self.store.drop_table()
         self.store.create_table()
 

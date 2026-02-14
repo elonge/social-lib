@@ -1,9 +1,9 @@
 import os
 import json
 import time
-import requests
+import httpx
+import asyncio
 from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from deduplicator import BookDeduplicator
 
@@ -15,12 +15,12 @@ class BookEnricher:
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         self.model_name = model_name
 
-    def enrich_book(self, book_data: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    async def enrich_book(self, book_data: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Enrich a book's metadata using Google Books, Open Library, and Gemini.
         Returns (enriched_data, diagnostics).
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         title = book_data.get("title")
         author = book_data.get("author")
         
@@ -32,28 +32,33 @@ class BookEnricher:
         }
 
         if not title:
-            diagnostics["duration_seconds"] = time.time() - start_time
+            diagnostics["duration_seconds"] = time.perf_counter() - start_time
             return book_data, diagnostics
 
         # 1. Try Open Library first, then Google Books
-        ol_res = self._fetch_open_library_raw(title, author)
-        gb_res = self._fetch_google_books_raw(title, author)
+        ol_res = await self._fetch_open_library_raw(title, author)
+        gb_res = await self._fetch_google_books_raw(title, author)
         
         diagnostics["google_books_success"] = gb_res is not None
+        if not gb_res:
+            print(f"[Miss] Google Books did not find '{title}'")
+            
         diagnostics["open_library_success"] = ol_res is not None
+        if not ol_res:
+             print(f"[Miss] Open Library did not find '{title}'")
         
         external_data = self._combine_raw_data(gb_res, ol_res)
         
         # 2. If not found, try Gemini for fuzzy correction
         if not external_data:
             diagnostics["gemini_correction_used"] = True
-            corrected = self._gemini_fuzzy_correction(book_data)
+            corrected = await self._gemini_fuzzy_correction(book_data)
             if corrected:
                 title = corrected.get("title", title)
                 author = corrected.get("author", author)
                 
-                ol_res = self._fetch_open_library_raw(title, author)
-                gb_res = self._fetch_google_books_raw(title, author)
+                ol_res = await self._fetch_open_library_raw(title, author)
+                gb_res = await self._fetch_google_books_raw(title, author)
                 
                 diagnostics["google_books_success"] = diagnostics["google_books_success"] or (gb_res is not None)
                 diagnostics["open_library_success"] = diagnostics["open_library_success"] or (ol_res is not None)
@@ -69,15 +74,15 @@ class BookEnricher:
                 if not enriched.get(key) or (key == "title" and value):
                     enriched[key] = value
                     
-        diagnostics["duration_seconds"] = time.time() - start_time
+        diagnostics["duration_seconds"] = time.perf_counter() - start_time
         return enriched, diagnostics
 
-    def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5, dedupe_mode: Optional[str] = "proximity", dedupe_window: int = 20) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    async def batch_enrich(self, books: List[Dict[str, Any]], max_workers: int = 5, dedupe_mode: Optional[str] = "proximity", dedupe_window: int = 20) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Enrich multiple books in parallel, deduplicate results, and return results plus aggregated diagnostics.
         dedupe_mode: "proximity", "counting", or None
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
         
         # Filter out books that do not have a title
         books = [b for b in books if b.get("title", "").strip()]
@@ -93,9 +98,7 @@ class BookEnricher:
                 "deduplicated_count": 0
             }
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # zip results to separate books and diagnostics
-            results = list(executor.map(self.enrich_book, books))
+        results = await asyncio.gather(*(self.enrich_book(book) for book in books))
             
         enriched_books = [r[0] for r in results]
         individual_diagnostics = [r[1] for r in results]
@@ -111,7 +114,7 @@ class BookEnricher:
         else:
             deduplicated_books = enriched_books
         
-        total_duration = time.time() - start_time
+        total_duration = time.perf_counter() - start_time
         
         # Aggregate stats
         aggregated = {
@@ -136,10 +139,10 @@ class BookEnricher:
         
         return deduplicated_books, aggregated
 
-    def _fetch_external_data(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def _fetch_external_data(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
         """DEPRECATED: Use raw fetch and combine for diagnostics."""
-        gb_data = self._fetch_google_books(title, author)
-        ol_data = self._fetch_open_library(title, author)
+        gb_data = await self._fetch_google_books(title, author)
+        ol_data = await self._fetch_open_library(title, author)
         return self._combine_raw_data(gb_data, ol_data)
 
     def _combine_raw_data(self, gb_data: Optional[Dict[str, Any]], ol_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -159,21 +162,27 @@ class BookEnricher:
             combined["cover_link"] = self._normalize_cover_link(combined.get("cover_link"))
         return combined
 
-    def _fetch_google_books_raw(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
-        return self._fetch_google_books(title, author)
+    async def _fetch_google_books_raw(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
+        return await self._fetch_google_books(title, author)
 
-    def _fetch_open_library_raw(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
-        return self._fetch_open_library(title, author)
+    async def _fetch_open_library_raw(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
+        return await self._fetch_open_library(title, author)
 
-    def _fetch_google_books(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def _fetch_google_books(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
         """Fetch metadata from Google Books API."""
+        start = time.perf_counter()
         query = f"intitle:{title}"
         if author:
             query += f"+inauthor:{author}"
             
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
         try:
-            response = requests.get(url, timeout=10)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=10)
+            duration = time.perf_counter() - start
+            if duration > 2.0:
+                print(f"[Slow API] Google Books for '{title}': {duration:.2f}s")
+                
             if response.status_code == 200:
                 data = response.json()
                 if "items" in data:
@@ -200,17 +209,25 @@ class BookEnricher:
                     }
         except Exception as e:
             print(f"Error fetching from Google Books: {e}")
+            if time.perf_counter() - start > 2.0:
+                 print(f"[Slow API] Google Books ERROR for '{title}': {time.perf_counter() - start:.2f}s")
         return None
 
-    def _fetch_open_library(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def _fetch_open_library(self, title: str, author: Optional[str]) -> Optional[Dict[str, Any]]:
         """Fetch metadata from Open Library API."""
+        start = time.perf_counter()
         query = f"title={title}"
         if author:
             query += f"&author={author}"
             
         url = f"https://openlibrary.org/search.json?{query}&limit=1"
         try:
-            response = requests.get(url, timeout=10)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=10)
+            duration = time.perf_counter() - start
+            if duration > 2.0:
+                 print(f"[Slow API] Open Library for '{title}': {duration:.2f}s")
+            
             if response.status_code == 200:
                 data = response.json()
                 if data.get("docs"):
@@ -231,10 +248,13 @@ class BookEnricher:
                     }
         except Exception as e:
             print(f"Error fetching from Open Library: {e}")
+            if time.perf_counter() - start > 2.0:
+                 print(f"[Slow API] Open Library ERROR for '{title}': {time.perf_counter() - start:.2f}s")
         return None
 
-    def _gemini_fuzzy_correction(self, book_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _gemini_fuzzy_correction(self, book_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Use Gemini to correct book metadata fuzzy-style."""
+        start = time.perf_counter()
         if not self.client:
             return None
             
@@ -263,11 +283,15 @@ JSON Format:
 }}
 """
         try:
-            response = self.client.models.generate_content(
+            response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=[prompt],
                 config={'temperature': 0.1}
             )
+            duration = time.perf_counter() - start
+            if duration > 2.0:
+                 print(f"[Slow API] Gemini Correction for '{book_data.get('title')}': {duration:.2f}s")
+
             text = response.text.strip()
             # Basic JSON cleanup
             if "```json" in text:
@@ -278,6 +302,8 @@ JSON Format:
             return json.loads(text)
         except Exception as e:
             print(f"Error in Gemini fuzzy correction: {e}")
+            if time.perf_counter() - start > 2.0:
+                 print(f"[Slow API] Gemini Correction ERROR for '{book_data.get('title')}': {time.perf_counter() - start:.2f}s")
         return None
 
     def _normalize_cover_link(self, link: Optional[str]) -> Optional[str]:

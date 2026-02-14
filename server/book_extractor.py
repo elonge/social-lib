@@ -62,7 +62,7 @@ class GeminiBookExtractor:
         if self.rescale:
             print(f"Rescale enabled: max dimension {self.rescale}px")
         
-    def extract_books_from_image(self, image_path: str) -> Dict[str, Any]:
+    async def extract_books_from_image(self, image_path: str) -> Dict[str, Any]:
         """
         Extract book information from a single image file.
         
@@ -74,9 +74,9 @@ class GeminiBookExtractor:
         """
         with open(image_path, 'rb') as f:
             image_bytes = f.read()
-        return self.extract_books_from_image_bytes(image_bytes)
+        return await self.extract_books_from_image_bytes(image_bytes)
 
-    def extract_books_from_image_bytes(self, image_bytes: bytes) -> Dict[str, Any]:
+    async def extract_books_from_image_bytes(self, image_bytes: bytes) -> Dict[str, Any]:
         """
         Extract book information from image bytes.
         
@@ -123,7 +123,7 @@ Only return the table, no other text. Do not include markdown code blocks."""
         print("    Running inference...")
         start_time = time.time()
         try:
-            response = self.client.models.generate_content(
+            response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=[prompt, image],
                 config={
@@ -194,7 +194,7 @@ Only return the table, no other text. Do not include markdown code blocks."""
         return result
 
 
-def process_video(
+async def process_video(
     video_path: str,
     output_dir: str,
     frame_interval: int = 30,
@@ -273,7 +273,7 @@ def process_video(
             cv2.imwrite(str(frame_path), frame)
             
             # Extract books from frame
-            result = extractor.extract_books_from_image(str(frame_path))
+            result = await extractor.extract_books_from_image(str(frame_path))
             
             # Add metadata
             result["frame_number"] = frame_count
@@ -331,7 +331,7 @@ def process_video(
     print(f"{'='*60}")
 
 
-def process_image(
+async def process_image(
     image_path: str,
     output_path: str,
     api_key: str = None,
@@ -376,7 +376,7 @@ def process_image(
     print(f"\nResults saved to: {output_path}")
 
 
-def process_image_bytes(
+async def process_image_bytes(
     image_bytes: bytes,
     api_key: str = None,
     model_name: str = "gemini-3-flash-preview",
@@ -411,7 +411,7 @@ def process_image_bytes(
     )
     
     # Extract books
-    result = extractor.extract_books_from_image_bytes(image_bytes)
+    result = await extractor.extract_books_from_image_bytes(image_bytes)
     
     # Post-process: filter and deduplicate
     if "books" in result and result["books"]:
