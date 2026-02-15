@@ -380,7 +380,7 @@ async def process_image_bytes(
     rescale: int = None,
     vertexai: bool = False,
     project: str = None,
-    location: str = "us-central1"
+    location: str = "global"
 ):
     """
     Process image bytes and extract book information.
