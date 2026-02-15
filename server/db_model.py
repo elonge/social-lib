@@ -4,14 +4,16 @@ from typing import Dict, Any, List, Optional, Annotated
 from document_store import PartitionKey, SortKey, CopyOfKey
 
 @dataclass(frozen=True)
-class RawLibraryBookKey:
+class FrameUploadKey:
     user_id: Annotated[str, PartitionKey]
+    session_id: Annotated[str, SortKey]
     frame_id: Annotated[int, SortKey]
 
 @dataclass
-class RawLibraryBookEntry:
-    key: Annotated[RawLibraryBookKey, CopyOfKey]
+class FrameUploadEntry:
+    key: Annotated[FrameUploadKey, CopyOfKey]
     shelf: Optional[str] = None
+    library_id: Optional[str] = None
     books: List[Dict[str, Any]] = field(default_factory=list)
 
 @dataclass(frozen=True)

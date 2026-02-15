@@ -11,7 +11,7 @@ import os
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth
-from db_model import RawLibraryBookKey, RawLibraryBookEntry, LibraryBookKey, LibraryBook, ShelfFrameMetadataKey, ShelfFrameMetadata, LibraryKey, Library, Shelf, ShelfKey
+from db_model import FrameUploadKey, FrameUploadEntry, LibraryBookKey, LibraryBook, ShelfFrameMetadataKey, ShelfFrameMetadata, LibraryKey, Library, Shelf, ShelfKey
 
 from book_extractor import process_image_bytes
 from book_enricher import BookEnricher
@@ -102,12 +102,12 @@ image_storage = get_image_storage("file" if os.getenv("GOOGLE_API_KEY") else "gc
 mongo_conn = get_config_value("MONGODB_CONNECTION", "mongodb-connection")
 mongo_client = MongoClient(mongo_conn)
 
-user_raw_books_store = MongoDocumentStore[RawLibraryBookKey, RawLibraryBookEntry](
+user_uploads_store = MongoDocumentStore[FrameUploadKey, FrameUploadEntry](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="user_raw_books",
-    key_type=RawLibraryBookKey,
-    data_type=RawLibraryBookEntry
+    collection_name="user_uploads",
+    key_type=FrameUploadKey,
+    data_type=FrameUploadEntry
 )
 
 user_books_store = MongoDocumentStore[LibraryBookKey, LibraryBook](
@@ -129,7 +129,7 @@ user_shelf_frame_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, Shel
 user_library_store = MongoDocumentStore[LibraryKey, Library](client=mongo_client, database_name="social_lib", collection_name="user_library", key_type=LibraryKey, data_type=Library)
 user_shelf_store = MongoDocumentStore[ShelfKey, Shelf](client=mongo_client, database_name="social_lib", collection_name="user_shelf", key_type=ShelfKey, data_type=Shelf)
 
-user_raw_books_store.create_table()
+user_uploads_store.create_table()
 user_library_store.create_table()
 user_shelf_frame_metadata_store.create_table()
 user_library_store.create_table()
@@ -306,18 +306,20 @@ async def upload_frame(
     file: UploadFile = File(...), 
     session_id: Optional[str] = Form(None), 
     frame_id: Optional[int] = Form(None),
+    library_id: Optional[str] = Form(None),
     shelf: Optional[str] = Form(None),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Receives an image file, extracts books, enriches them, and returns them with a count.
     Saves results to session using books_<frame_id> if session_id is provided.
-    Saves raw library entry to MongoDB.
+    Saves upload entry to MongoDB.
     """
     user_id = current_user["uid"]
 
     session = session_store.get_session(session_id)
-    library_id = session["library_id"]
+    if session:
+        library_id = session["library_id"]
 
     # Read image bytes
     content = await file.read()
@@ -339,12 +341,12 @@ async def upload_frame(
         enriched_books, stats = await enricher.batch_enrich(raw_books, dedupe_mode="counting")
         
         # 2.5 Save to raw library document store
-        entry_key = RawLibraryBookKey(user_id=user_id, frame_id=frame_id)
-        entry = RawLibraryBookEntry(entry_key, shelf=shelf, books=enriched_books)
-        user_raw_books_store.put(entry_key, entry)
+        entry_key = FrameUploadKey(user_id, session_id, frame_id)
+        entry = FrameUploadEntry(entry_key, shelf, library_id, enriched_books)
+        user_uploads_store.put(entry_key, entry)
         
         # 2.6 Save shelf frame metadata
-        meta_key = ShelfFrameMetadataKey(user_id=user_id, library_id=library_id, frame_id=frame_id)
+        meta_key = ShelfFrameMetadataKey(user_id, library_id, frame_id)
         metadata = ShelfFrameMetadata(
             key=meta_key,
             shelf=shelf,
@@ -364,7 +366,7 @@ async def upload_frame(
         }
         
         # 3. Save to session if session_id is provided
-        if session_id:
+        if session:
             print(f"Saving to session: {session_id}, frame_id: {frame_id}")
             session_store.put(session_id, f"books_{frame_id}", response_data)
             response_data["session_id"] = session_id
@@ -386,37 +388,39 @@ async def complete_upload(
     results = request.results
     user_id = current_user["uid"]
 
-    # Patch for reconstructing library from raw books
-    if request.session_id == "my_library":
-        frames = user_raw_books_store.get_range(RawLibraryBookKey(user_id, 0), RawLibraryBookKey(user_id, time.time_ns() // 1_000_000))
-        results = []
-        for frame in frames:
-            f = frame[1]
-            f.frame_id = frame[0].frame_id
-            results.append(to_dict(f))
-        library_id = "my_library"
-
     # If results are not provided, try to fetch from session
     if not results and request.session_id:
         full_session = session_store.get_session(request.session_id)
-        if not full_session:
-            return {"status": "error", "message": "Session not found"}
+        if full_session:        
+            library_id = full_session.get("library_id")
+            
+            # Aggregate all frame results (keys starting with books_)
+            # Sort keys numerically based on the frame_id suffix
+            frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
+            
+            def get_frame_num(k):
+                try:
+                    return int(k.split("_")[1])
+                except (IndexError, ValueError):
+                    return 0
+            
+            frame_keys.sort(key=get_frame_num)
+            results = [full_session[k] for k in frame_keys]
         
-        library_id = full_session.get("library_id")
-        
-        # Aggregate all frame results (keys starting with books_)
-        # Sort keys numerically based on the frame_id suffix
-        frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
-        
-        def get_frame_num(k):
-            try:
-                return int(k.split("_")[1])
-            except (IndexError, ValueError):
-                return 0
-        
-        frame_keys.sort(key=get_frame_num)
-        results = [full_session[k] for k in frame_keys]
-        
+        # Reconstruct library from uploads table
+        else:
+            frames = user_uploads_store.get_range(
+                FrameUploadKey(user_id, request.session_id, 0),
+                FrameUploadKey(user_id, request.session_id, time.time_ns() // 1_000_000)
+            )
+            results = []
+            if frames and len(frames) > 0:
+                library_id = frames[0][1].library_id
+                for frame in frames:
+                    f = frame[1]
+                    f.frame_id = frame[0].frame_id
+                    results.append(to_dict(f))
+
         if not results:
             return {"status": "error", "message": "Session empty (no frames found)"}
             
