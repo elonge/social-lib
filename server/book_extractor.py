@@ -15,6 +15,7 @@ from google import genai
 from PIL import Image
 import time
 import io
+from google.genai import types
 from deduplicator import BookDeduplicator
 
 class GeminiBookExtractor:
@@ -107,8 +108,14 @@ For each book, identify:
 Return the information as a pipe-separated table, one book per line.
 Header: title | author | publisher | year | other_text
 
+The information may be in different languages, not necessarily English. 
+So consider that the titles an otehr information may not be english.
+
+Do not use external sources to verify the book information, just use what you see in the image.
+
 If a field is not visible, use "null".
 If you see a book but cannot read it, include it with "null" values.
+If you are not sure about the text of any data item, set it as "null".
 
 If you see a book only partially - do not analyze it.
 
@@ -123,10 +130,11 @@ Only return the table, no other text. Do not include markdown code blocks."""
             response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=[prompt, image],
-                config={
-                    'temperature': 0.1,
-                    'max_output_tokens': 8000,
-                },
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8000,
+                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+                ),
             )
             
             elapsed = time.time() - start_time

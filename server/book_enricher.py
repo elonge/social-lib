@@ -287,7 +287,11 @@ JSON Format:
             response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=[prompt],
-                config={'temperature': 0.1}
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=8000,
+                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+                ),
             )
             duration = time.perf_counter() - start
             if duration > 2.0:

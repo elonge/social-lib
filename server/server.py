@@ -24,6 +24,10 @@ from google.cloud import secretmanager
 
 load_dotenv()
 
+# Uncomment for local development
+# os.environ["GOOGLE_CLOUD_PROJECT"]='social-lib-487109'
+# os.environ["TEST_USER"]='test_user'
+
 project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 def get_config_value(env_var_name: str, secret_name: str) -> Optional[str]:
