@@ -20,7 +20,7 @@ from deduplicator import BookDeduplicator
 class GeminiBookExtractor:
     """Extract book information from images using Gemini Vision API."""
     
-    def __init__(self, api_key: str = None, model_name: str = "gemini-3-flash-preview", rescale: int = None, vertexai: bool = False, project: str = None, location: str = "us-central1"):
+    def __init__(self, api_key: str = None, model_name: str = "gemini-3-flash-preview", rescale: int = None, vertexai: bool = False, project: str = None, location: str = "global"):
         """
         Initialize the Gemini or Vertex AI client.
         
@@ -109,6 +109,8 @@ Header: title | author | publisher | year | other_text
 
 If a field is not visible, use "null".
 If you see a book but cannot read it, include it with "null" values.
+
+If you see a book only partially - do not analyze it.
 
 Return the books in the order they appear from left to right (for vertically stacked books), and top to bottom (for horiozontally stacked books)
 

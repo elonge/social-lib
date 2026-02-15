@@ -63,6 +63,18 @@ export default function Home() {
     // Import apiRequest dynamically or at top level (doing it here for this block context)
     const { apiRequest } = await import('../lib/api');
 
+    var session_id = "test";
+    try {
+        // apiRequest automatically attaches valid Firebase ID token
+        // We need to make sure apiRequest handles FormData correctly (it should if we don't set Content-Type manually to json)
+        const data = await apiRequest('/init_upload', {
+          method: 'POST'
+        });
+        session_id = data.session_id;
+    } catch (error) {
+        console.error('Error in init upload session:', error);
+    }
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const placeholderId = newFrames[i].id;
@@ -75,6 +87,7 @@ export default function Home() {
 
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('session_id', session_id);
       // user_id is NOT sent anymore, server extracts it from token
 
       try {
@@ -121,6 +134,7 @@ export default function Home() {
         body: JSON.stringify({
           results: selectedFrames.map(f => f.rawResult),
           enrich: enrich,
+          session_id: session_id,
           // user_id removed
         }),
       });
