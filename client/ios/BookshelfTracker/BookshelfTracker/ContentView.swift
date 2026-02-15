@@ -3,6 +3,8 @@ import ARKit
 import RealityKit
 import CoreImage
 import UIKit
+import Vision
+import AVFoundation
 
 struct ContentView: View {
     @StateObject private var viewModel = SessionViewModel()
@@ -40,7 +42,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showResults) {
-            ResultsView(books: viewModel.identifiedBooks)
+            ResultsView(books: viewModel.identifiedBooks, logURL: viewModel.getLogURL())
         }
     }
 }
@@ -80,7 +82,12 @@ struct PanoOverlayView: View {
         switch viewModel.distanceState {
         case .tooClose: return "TOO CLOSE - MOVE BACK"
         case .tooFar: return "TOO FAR - MOVE CLOSER"
-        case .unknown: return "FINDING WALL..."
+        case .unknown: 
+            // Suppress "FINDING WALL" for the first 2.5s of recording
+            if viewModel.recordingDuration < 2.5 {
+                return ""
+            }
+            return "FINDING WALL..."
         case .optimal: break
         }
         
@@ -142,6 +149,19 @@ struct PanoOverlayView: View {
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
                             .foregroundColor(PanoOverlayView.statusColor(for: viewModel))
                             .multilineTextAlignment(.center)
+                    }
+                    
+                    if viewModel.isEndOfShelfDetected && viewModel.isRecording {
+                        Text("SHELF ENDED")
+                            .font(.system(size: 16, weight: .black, design: .monospaced))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.red)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .shadow(radius: 4)
+                            .transition(.scale.combined(with: .opacity))
+                            .padding(.top, 4)
                     }
                 }
                 .padding(.top, 18)
@@ -303,30 +323,34 @@ struct PanoBottomBar: View {
     
     var body: some View {
         HStack {
-            if !viewModel.identifiedBooks.isEmpty && !viewModel.isRecording {
-                Button(action: { showResults = true }) {
-                    Image(systemName: "books.vertical.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 44, height: 44)
-                        .background(Color.black.opacity(0.6))
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+            // Left Group
+            HStack(spacing: 12) {
+                if viewModel.isDebugEnabled {
+                    // Share Log Button
+                    ShareLink(item: viewModel.getLogURL()) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.blue.opacity(0.6))
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                    }
                 }
-            } else if viewModel.isDebugEnabled {
-                // Share Log Button
-                ShareLink(item: viewModel.getLogURL()) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 44, height: 44)
-                        .background(Color.blue.opacity(0.6))
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                
+                if !viewModel.identifiedBooks.isEmpty && !viewModel.isRecording {
+                    Button(action: { showResults = true }) {
+                        Image(systemName: "books.vertical.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.black.opacity(0.6))
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                    }
                 }
-            } else {
-                Color.clear.frame(width: 44, height: 44)
             }
+            .frame(minWidth: 44, alignment: .leading)
             
             Spacer()
             
@@ -425,6 +449,7 @@ struct FinalizingView: View {
 
 struct ResultsView: View {
     let books: [Book]
+    let logURL: URL?
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
@@ -460,6 +485,13 @@ struct ResultsView: View {
             }
             .navigationTitle("Shelf Summary")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if let url = logURL {
+                        ShareLink(item: url) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") { dismiss() }
                 }
@@ -632,6 +664,14 @@ struct ARViewContainer: UIViewRepresentable {
         private var lockedDirection: PanoDirection = .unknown
         private var distanceToShelf: Float = 0
         private var consecutiveRaycastFailures = 0
+        private var recordingStartTime: TimeInterval?
+        private var distanceDetectionMethod: String = "Initializing"
+        
+        // End of Shelf Detection State (Dry Run)
+        private var lastStableDistance: Float?
+        private var currentPlaneAnchorIdentifier: UUID?
+        private var isProcessingVision = false
+        private var visionTextDensity: Float = 0
         
         private var hasCapturedFirstFrame = false
         private var optimalStateStartTime: TimeInterval?
@@ -677,6 +717,7 @@ struct ARViewContainer: UIViewRepresentable {
                 lastYaw = yaw
                 lastTimestamp = frame.timestamp
                 lastCapturePosition = position
+                recordingStartTime = frame.timestamp
                 didAutoStop = false
                 lockedDirection = .unknown
                 DispatchQueue.main.async {
@@ -686,6 +727,7 @@ struct ARViewContainer: UIViewRepresentable {
                     self.viewModel.panoRoll = 0
                     self.viewModel.panoPitch = 0
                     self.viewModel.panoYaw = 0
+                    self.viewModel.recordingDuration = 0
                 }
                 return
             }
@@ -704,6 +746,7 @@ struct ARViewContainer: UIViewRepresentable {
             let horizontalDistance = sqrt(pow(deltaPos.x, 2) + pow(deltaPos.z, 2))
             let progress = min(max(horizontalDistance / targetMeters, 0.0), 1.0)
             
+            let duration = frame.timestamp - (recordingStartTime ?? frame.timestamp)
             let speedState = panoSpeedState(yaw: yaw, timestamp: frame.timestamp)
             
             // Convert to degrees for easier threshold comparison
@@ -720,6 +763,7 @@ struct ARViewContainer: UIViewRepresentable {
                 self.viewModel.panoRoll = rollDeg
                 self.viewModel.panoPitch = pitchDeg
                 self.viewModel.panoYaw = yawDeg
+                self.viewModel.recordingDuration = duration
                 
                 // Detailed UI Debug Log
                 let guideWidth: Float = 310.0
@@ -734,26 +778,22 @@ struct ARViewContainer: UIViewRepresentable {
             
             // First Frame Logic: Capture immediately once optimal
             if !hasCapturedFirstFrame {
-                let roll = rollDeg
-                let pitch = pitchDeg
-                let yaw = yawDeg
-                
-                let isPerfect = abs(roll + 90) <= 15 && abs(pitch) <= 35 && abs(yaw) <= 35
+                let isPerfect = abs(rollDeg + 90) <= 15 && abs(pitchDeg) <= 35 && abs(yawDeg) <= 35
                 let isDistanceOptimal = viewModel.distanceState == .optimal
                 
                 if isPerfect && isDistanceOptimal {
                     // Snap immediately, no 0.2s delay
                     self.lastCapturePosition = position
                     self.hasCapturedFirstFrame = true
-                    takeSnapshot(frame: frame)
+                    takeSnapshot(frame: frame, roll: rollDeg, pitch: pitchDeg, yaw: yawDeg, distanceState: .optimal)
                 }
             } else {
                 // Normal distance-based logic (only after first frame is captured)
                 if lockedDirection != .unknown, !isCoolingDown, let lastCapturePos = lastCapturePosition {
-                    let distFromLast = distance(position, lastCapturePos)
+                    let distFromLast = simd_distance(position, lastCapturePos)
                     if distFromLast >= dynamicCaptureStep {
                         self.lastCapturePosition = position
-                        takeSnapshot(frame: frame)
+                        takeSnapshot(frame: frame, roll: rollDeg, pitch: pitchDeg, yaw: yawDeg, distanceState: viewModel.distanceState)
                     }
                 }
             }
@@ -762,57 +802,239 @@ struct ARViewContainer: UIViewRepresentable {
             lastTimestamp = frame.timestamp
         }
         
+        private func checkEndOfShelfMethods(session: ARSession, frame: ARFrame, distanceState: DistanceState) {
+            guard viewModel.isRecording else { return }
+            
+            var detections: [String: Bool] = [:]
+            let timestamp = frame.timestamp
+            
+            // 1. Depth Discontinuity (The "Jump")
+            if let lastDist = lastStableDistance, distanceToShelf > 0 {
+                // If distance jumps by more than 40cm suddenly
+                let isJump = distanceToShelf > (lastDist + 0.40)
+                detections["JUMP"] = isJump
+                if isJump { viewModel.log("DETECTED: Depth Jump! \(lastDist)m -> \(distanceToShelf)m") }
+            }
+            if distanceState == .optimal {
+                lastStableDistance = distanceToShelf
+            }
+            
+            // 2. Vertical Plane Boundary
+            // We check if we are still hitting a vertical surface
+            let rayQuery = frame.raycastQuery(from: CGPoint(x: 0.5, y: 0.5), allowing: .existingPlaneGeometry, alignment: .vertical)
+            let results = session.raycast(rayQuery)
+            
+            if let first = results.first {
+                // If we hit a DIFFERENT anchor, check if it's a dramatic depth jump
+                if let currentID = currentPlaneAnchorIdentifier, first.anchor?.identifier != currentID {
+                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                    let newDist = simd_distance(hitPos, camPos)
+                    
+                    if abs(newDist - distanceToShelf) > 0.30 {
+                        detections["PLANE_EDGE"] = true
+                        viewModel.log("DETECTED: Plane Boundary! Depth jump during anchor switch: \(distanceToShelf)m -> \(newDist)m")
+                    } else {
+                        // Smooth transition to new anchor
+                        currentPlaneAnchorIdentifier = first.anchor?.identifier
+                    }
+                }
+            } else if consecutiveRaycastFailures > 15 { // ~0.5 seconds of total failure
+                detections["PLANE_EDGE"] = true
+                viewModel.log("DETECTED: Plane Boundary! Raycast failures exceeded threshold.")
+            } else if consecutiveRaycastFailures > 75 && currentPlaneAnchorIdentifier == nil { 
+                detections["PLANE_EDGE"] = true
+                viewModel.log("DETECTED: Plane Boundary! No plane found during initial scan window.")
+            }
+            
+            // 3. Feature Point Depletion
+            if let points = frame.rawFeaturePoints {
+                let allPoints = points.points
+                let screenWidth: Float = 1.0 // Normalized
+                
+                // Count points in the leading 30% of the screen (assuming right-to-left or vice-versa)
+                // In Portrait, ARKit X/Y might be flipped, but we'll use a simple count for now
+                let count = allPoints.count
+                if count < 20 && count > 0 { // Arbitrary low threshold
+                    detections["FEATURES"] = true
+                    viewModel.log("DETECTED: Feature Depletion! Only \(count) points found.")
+                }
+            }
+            
+            // 4. Apple Vision (Text Density)
+            if !isProcessingVision {
+                isProcessingVision = true
+                let pixelBuffer = frame.capturedImage
+                let request = VNDetectTextRectanglesRequest { [weak self] request, error in
+                    defer { self?.isProcessingVision = false }
+                    guard let results = request.results as? [VNTextObservation] else { return }
+                    
+                    let density = Float(results.count)
+                    let isLow = density < 0.5 // Require absolute zero (0 blocks) to trigger detection
+                    
+                    DispatchQueue.main.async {
+                        self?.viewModel.endOfShelfDetections["VISION"] = isLow
+                    }
+                    if isLow { self?.viewModel.log("DETECTED: Vision Low Text Density! (\(Int(density)) blocks)") }
+                }
+                
+                let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+                try? handler.perform([request])
+            }
+            
+            // 5. AVFoundation / LiDAR (Depth Cliff)
+            if let sceneDepth = frame.sceneDepth {
+                let depthMap = sceneDepth.depthMap
+                let width = CVPixelBufferGetWidth(depthMap)
+                let height = CVPixelBufferGetHeight(depthMap)
+                
+                CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+                if let baseAddress = CVPixelBufferGetBaseAddress(depthMap) {
+                    let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+                    
+                    // Sample a few points on the leading edge (right side of portrait frame)
+                    // Row-major: index = y * width + x
+                    let x = Int(Float(width) * 0.8)
+                    let y = height / 2
+                    let depthAtEdge = floatBuffer[y * width + x]
+                    
+                    if depthAtEdge > (distanceToShelf + 0.5) {
+                        detections["LIDAR"] = true
+                        viewModel.log("DETECTED: LiDAR Depth Cliff! Center: \(distanceToShelf)m, Edge: \(depthAtEdge)m")
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+            }
+            
+            DispatchQueue.main.async {
+                // Update detections (preserving VISION which is async)
+                let vision = self.viewModel.endOfShelfDetections["VISION"] ?? false
+                self.viewModel.endOfShelfDetections = detections
+                self.viewModel.endOfShelfDetections["VISION"] = vision
+                
+                // Consolidated STOP Logic (Dry Run)
+                // Trigger if we lose the plane AND (we see no features OR vision sees no text)
+                // ADDED: Require speed to be OK/Slow to avoid motion-blur false positives
+                let planeEdge = detections["PLANE_EDGE"] ?? false
+                let featureDepletion = detections["FEATURES"] ?? false
+                let speedIsOK = self.viewModel.panoSpeed != .tooFast
+                
+                let isEndDetected = planeEdge && (featureDepletion || vision) && speedIsOK
+                if isEndDetected && !self.viewModel.isEndOfShelfDetected {
+                    self.viewModel.log("!!! CONSOLIDATED DETECTION: SHELF ENDED !!!")
+                }
+                self.viewModel.isEndOfShelfDetected = isEndDetected
+            }
+        }
+        
+        private var updateCounter = 0
+        
         private func updateDynamicStep(session: ARSession, frame: ARFrame) {
+            updateCounter += 1
+            
             // 1. Get Horizontal Field of View
             let intrinsics = frame.camera.intrinsics
             let resolution = frame.camera.imageResolution
             let focalLengthX = intrinsics[0][0]
             let hFov = 2 * atan(Float(resolution.width) / (2 * focalLengthX))
             
-            // 2. Estimate distance to shelf (Robust Multi-Point Raycast)
-            var currentState: DistanceState = .unknown
+            var currentState: DistanceState = self.viewModel.distanceState
             var foundDistance: Float?
+            var method = "None"
+            var hits = 0
             
-            // Raycast points: Center, slightly above, slightly below
-            let points = [CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.5, y: 0.4), CGPoint(x: 0.5, y: 0.6)]
+            // --- DISTANCE DETECTION STRATEGY ---
             
-            for point in points {
-                // Try 1: Existing Plane (Most accurate)
-                let planeResults = frame.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .vertical)
-                if let first = session.raycast(planeResults).first {
-                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
-                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
-                    foundDistance = distance(hitPos, camPos)
-                    self.viewModel.log("Raycast: Hit Existing Plane at \(foundDistance ?? 0)m")
-                    break
-                } 
+            // OPTION A: LiDAR (Raw Scene Depth)
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth), let sceneDepth = frame.sceneDepth {
+                method = "LiDAR"
+                let depthMap = sceneDepth.depthMap
+                let width = CVPixelBufferGetWidth(depthMap)
+                let height = CVPixelBufferGetHeight(depthMap)
                 
-                // Try 2: Estimated Plane
-                let estimatedResults = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .vertical)
-                if let first = session.raycast(estimatedResults).first {
-                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
-                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
-                    foundDistance = distance(hitPos, camPos)
-                    self.viewModel.log("Raycast: Hit Estimated Plane at \(foundDistance ?? 0)m")
-                    break
+                CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+                if let baseAddress = CVPixelBufferGetBaseAddress(depthMap) {
+                    let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+                    
+                    // Sample a 3x3 grid in the center of the LiDAR buffer
+                    var sum: Float = 0
+                    var count: Int = 0
+                    for row in -1...1 {
+                        for col in -1...1 {
+                            let x = (width / 2) + (col * (width / 10))
+                            let y = (height / 2) + (row * (height / 10))
+                            let d = floatBuffer[y * width + x]
+                            if d > 0.05 && d < 5.0 { // Valid LiDAR range
+                                sum += d
+                                count += 1
+                            }
+                        }
+                    }
+                    if count > 0 {
+                        foundDistance = sum / Float(count)
+                        hits = count
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+            } 
+            
+            // OPTION B: 3x3 Raycast Grid (Fallback)
+            // Perform this check every 3 frames to avoid main thread lag
+            if foundDistance == nil && updateCounter % 3 == 0 {
+                method = "Grid3x3"
+                var sum: Float = 0
+                var count: Int = 0
+                
+                // 3x3 grid shifted in direction of movement to "see ahead"
+                let shift = (self.lockedDirection == .right) ? 0.15 : (self.lockedDirection == .left ? -0.15 : 0.0)
+                
+                for row in 0..<3 {
+                    for col in 0..<3 {
+                        let px = 0.3 + Double(col) * 0.2 + shift
+                        let py = 0.3 + Double(row) * 0.2
+                        let point = CGPoint(x: px, y: py)
+                        
+                        // Try 1: Existing Plane
+                        let planeQuery = frame.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .vertical)
+                        if let first = session.raycast(planeQuery).first {
+                            let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+                            let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                            let d = simd_distance(hitPos, camPos)
+                            sum += d
+                            count += 1
+                            
+                            if self.currentPlaneAnchorIdentifier == nil { 
+                                self.currentPlaneAnchorIdentifier = first.anchor?.identifier 
+                            }
+                            continue
+                        }
+                        
+                        // Try 2: Estimated Plane
+                        let estQuery = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .vertical)
+                        if let first = session.raycast(estQuery).first {
+                            let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+                            let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                            let d = simd_distance(hitPos, camPos)
+                            sum += d
+                            count += 1
+                            if self.currentPlaneAnchorIdentifier == nil { 
+                                self.currentPlaneAnchorIdentifier = first.anchor?.identifier 
+                            }
+                        }
+                    }
                 }
                 
-                // Try 3: Feature Points (Any Surface)
-                let pointResults = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any)
-                if let first = session.raycast(pointResults).first {
-                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
-                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
-                    foundDistance = distance(hitPos, camPos)
-                    self.viewModel.log("Raycast: Hit Any Surface at \(foundDistance ?? 0)m")
-                    break
+                if count > 0 {
+                    foundDistance = sum / Float(count)
+                    hits = count
                 }
             }
             
-            if foundDistance == nil {
-                self.viewModel.log("Raycast: FAILED ALL STAGES across all points")
-            }
+            // --- SMOOTHING AND LOGGING ---
             
             if let dist = foundDistance {
+                self.viewModel.log("Distance: \(method) hit \(hits) pts | Raw: \(String(format: "%.2f", dist))m")
+                
                 // Smoothing (Low-pass filter: 90% old, 10% new)
                 let alpha: Float = 0.1
                 if self.distanceToShelf == 0 {
@@ -823,19 +1045,16 @@ struct ARViewContainer: UIViewRepresentable {
                 
                 self.consecutiveRaycastFailures = 0
                 
-                // New Lenient range: 15cm (0.15m) - 100cm (1.0m)
-                if self.distanceToShelf < 0.15 {
-                    currentState = .tooClose
-                } else if self.distanceToShelf > 1.00 {
-                    currentState = .tooFar
-                } else {
-                    currentState = .optimal
-                }
-            } else {
+                if self.distanceToShelf < 0.15 { currentState = .tooClose }
+                else if self.distanceToShelf > 1.00 { currentState = .tooFar }
+                else { currentState = .optimal }
+            } else if updateCounter % 3 == 0 || method == "LiDAR" {
+                // Only count failure if we actually tried (or if LiDAR failed which is rare)
                 self.consecutiveRaycastFailures += 1
+                if self.consecutiveRaycastFailures % 30 == 0 {
+                    self.viewModel.log("Distance: \(method) FAILED (All points missed)")
+                }
                 
-                // STICKY LOGIC: If we have a valid smoothed distance, and tracking is normal, 
-                // we TRUST that the wall hasn't moved for up to 5 seconds (150 frames).
                 if self.distanceToShelf > 0.15 && self.distanceToShelf < 1.0 && self.consecutiveRaycastFailures < 150 {
                     currentState = .optimal
                 } else {
@@ -847,13 +1066,14 @@ struct ARViewContainer: UIViewRepresentable {
                 self.viewModel.distanceState = currentState
             }
             
+            // DRY RUN: End of Shelf Detection Checks
+            checkEndOfShelfMethods(session: session, frame: frame, distanceState: currentState)
+            
             // 3. Visible Width = 2 * Distance * tan(FoV / 2)
             let currentDist = self.distanceToShelf > 0 ? self.distanceToShelf : 0.40 // Fallback width for calc
             let visibleWidth = 2 * currentDist * tan(hFov / 2)
             
             // 4. Step for 50% overlap = visibleWidth / 2
-            // User requested "max 10 frames" over 2 meters, which implies a 20cm step (2.0 / 10 = 0.20)
-            // We take the minimum of (50% overlap) and (20cm) to ensure quality but keep thumbnails large
             self.dynamicCaptureStep = max(min(visibleWidth / 2, 0.20), 0.05)
         }
         
@@ -868,6 +1088,12 @@ struct ARViewContainer: UIViewRepresentable {
             lockedDirection = .unknown
             hasCapturedFirstFrame = false
             optimalStateStartTime = nil
+            lastStableDistance = nil
+            currentPlaneAnchorIdentifier = nil
+            DispatchQueue.main.async {
+                self.viewModel.endOfShelfDetections = [:]
+                self.viewModel.isEndOfShelfDetected = false
+            }
         }
         
         private func yaw(from transform: simd_float4x4) -> Float {
@@ -907,17 +1133,14 @@ struct ARViewContainer: UIViewRepresentable {
             return 0
         }
         
-        func takeSnapshot(frame: ARFrame) {
+        func takeSnapshot(frame: ARFrame, roll: CGFloat, pitch: CGFloat, yaw: CGFloat, distanceState: DistanceState) {
             isCoolingDown = true
             
             let progress = viewModel.panoProgress
-            let roll = viewModel.panoRoll
-            let pitch = viewModel.panoPitch
-            let yaw = viewModel.panoYaw
             let isPerfect = abs(roll + 90) <= 15 && abs(pitch) <= 35 && abs(yaw) <= 35
             
             // STRICT REQUIREMENT: Only capture if distance is Optimal
-            let isDistanceOptimal = viewModel.distanceState == .optimal
+            let isDistanceOptimal = distanceState == .optimal
             
             if !isPerfect || !isDistanceOptimal {
                 let hasGoodNearby = viewModel.panoSnapshots.last { $0.image != nil && abs($0.progress - progress) < 0.03 } != nil

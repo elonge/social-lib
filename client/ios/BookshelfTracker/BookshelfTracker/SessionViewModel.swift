@@ -46,6 +46,9 @@ class SessionViewModel: ObservableObject {
     @Published var panoSnapshots: [PanoSnapshot] = []
     @Published var distanceState: DistanceState = .unknown
     @Published var isDebugEnabled = true
+    @Published var endOfShelfDetections: [String: Bool] = [:]
+    @Published var isEndOfShelfDetected = false
+    @Published var recordingDuration: TimeInterval = 0
     
     private var sessionResults: [[String: Any]] = []
     private let logFileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("pano_debug.log")
