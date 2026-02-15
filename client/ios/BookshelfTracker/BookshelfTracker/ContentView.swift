@@ -633,6 +633,9 @@ struct ARViewContainer: UIViewRepresentable {
         private var distanceToShelf: Float = 0
         private var consecutiveRaycastFailures = 0
         
+        private var hasCapturedFirstFrame = false
+        private var optimalStateStartTime: TimeInterval?
+        
         private let targetMeters: Float = 2.0
         private var dynamicCaptureStep: Float = 0.15 // Default fallback (15cm)
         private let maxYawSpeed: Float = 1.4
@@ -729,11 +732,29 @@ struct ARViewContainer: UIViewRepresentable {
                 self.viewModel.log("Pos:\(String(format: "%.2f", horizontalDistance))m | UI_X:\(String(format: "%.1f", currentProgressX)) | Arrow_X:\(String(format: "%.1f", arrowX)) | R:\(Int(rollDeg)) P:\(Int(pitchDeg)) Y:\(Int(yawDeg)) | Dist:\(String(format: "%.2f", self.distanceToShelf))m | Status: \(status)")
             }
             
-            if lockedDirection != .unknown, !isCoolingDown, let lastCapturePos = lastCapturePosition {
-                let distFromLast = distance(position, lastCapturePos)
-                if distFromLast >= dynamicCaptureStep {
+            // First Frame Logic: Capture immediately once optimal
+            if !hasCapturedFirstFrame {
+                let roll = rollDeg
+                let pitch = pitchDeg
+                let yaw = yawDeg
+                
+                let isPerfect = abs(roll + 90) <= 15 && abs(pitch) <= 35 && abs(yaw) <= 35
+                let isDistanceOptimal = viewModel.distanceState == .optimal
+                
+                if isPerfect && isDistanceOptimal {
+                    // Snap immediately, no 0.2s delay
                     self.lastCapturePosition = position
+                    self.hasCapturedFirstFrame = true
                     takeSnapshot(frame: frame)
+                }
+            } else {
+                // Normal distance-based logic (only after first frame is captured)
+                if lockedDirection != .unknown, !isCoolingDown, let lastCapturePos = lastCapturePosition {
+                    let distFromLast = distance(position, lastCapturePos)
+                    if distFromLast >= dynamicCaptureStep {
+                        self.lastCapturePosition = position
+                        takeSnapshot(frame: frame)
+                    }
                 }
             }
             
@@ -748,34 +769,47 @@ struct ARViewContainer: UIViewRepresentable {
             let focalLengthX = intrinsics[0][0]
             let hFov = 2 * atan(Float(resolution.width) / (2 * focalLengthX))
             
-            // 2. Estimate distance to shelf (Robust Raycast)
+            // 2. Estimate distance to shelf (Robust Multi-Point Raycast)
             var currentState: DistanceState = .unknown
             var foundDistance: Float?
             
-            // Try 1: Existing Plane (Most accurate)
-            let planeResults = frame.raycastQuery(from: CGPoint(x: 0.5, y: 0.5), allowing: .existingPlaneGeometry, alignment: .vertical)
-            if let first = session.raycast(planeResults).first {
-                let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
-                let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
-                foundDistance = distance(hitPos, camPos)
-            } 
-            // Try 2: Estimated Plane (If ARKit is still learning)
-            else {
-                let estimatedResults = frame.raycastQuery(from: CGPoint(x: 0.5, y: 0.5), allowing: .estimatedPlane, alignment: .vertical)
+            // Raycast points: Center, slightly above, slightly below
+            let points = [CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.5, y: 0.4), CGPoint(x: 0.5, y: 0.6)]
+            
+            for point in points {
+                // Try 1: Existing Plane (Most accurate)
+                let planeResults = frame.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .vertical)
+                if let first = session.raycast(planeResults).first {
+                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                    foundDistance = distance(hitPos, camPos)
+                    self.viewModel.log("Raycast: Hit Existing Plane at \(foundDistance ?? 0)m")
+                    break
+                } 
+                
+                // Try 2: Estimated Plane
+                let estimatedResults = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .vertical)
                 if let first = session.raycast(estimatedResults).first {
                     let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
                     let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
                     foundDistance = distance(hitPos, camPos)
+                    self.viewModel.log("Raycast: Hit Estimated Plane at \(foundDistance ?? 0)m")
+                    break
                 }
-                // Try 3: Feature Points (Raw point cloud - most reliable for messy bookshelves)
-                else {
-                    let pointResults = frame.raycastQuery(from: CGPoint(x: 0.5, y: 0.5), allowing: .estimatedPlane, alignment: .any)
-                    if let first = session.raycast(pointResults).first {
-                        let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
-                        let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
-                        foundDistance = distance(hitPos, camPos)
-                    }
+                
+                // Try 3: Feature Points (Any Surface)
+                let pointResults = frame.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any)
+                if let first = session.raycast(pointResults).first {
+                    let hitPos = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+                    let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                    foundDistance = distance(hitPos, camPos)
+                    self.viewModel.log("Raycast: Hit Any Surface at \(foundDistance ?? 0)m")
+                    break
                 }
+            }
+            
+            if foundDistance == nil {
+                self.viewModel.log("Raycast: FAILED ALL STAGES across all points")
             }
             
             if let dist = foundDistance {
@@ -800,15 +834,10 @@ struct ARViewContainer: UIViewRepresentable {
             } else {
                 self.consecutiveRaycastFailures += 1
                 
-                // If we have a last known distance, keep the state based on it for a long grace period (approx 1.5s at 30fps)
-                if self.distanceToShelf > 0 && self.consecutiveRaycastFailures < 45 {
-                    if self.distanceToShelf < 0.15 {
-                        currentState = .tooClose
-                    } else if self.distanceToShelf > 1.00 {
-                        currentState = .tooFar
-                    } else {
-                        currentState = .optimal
-                    }
+                // STICKY LOGIC: If we have a valid smoothed distance, and tracking is normal, 
+                // we TRUST that the wall hasn't moved for up to 5 seconds (150 frames).
+                if self.distanceToShelf > 0.15 && self.distanceToShelf < 1.0 && self.consecutiveRaycastFailures < 150 {
+                    currentState = .optimal
                 } else {
                     currentState = .unknown
                 }
@@ -837,6 +866,8 @@ struct ARViewContainer: UIViewRepresentable {
             didAutoStop = false
             isCoolingDown = false
             lockedDirection = .unknown
+            hasCapturedFirstFrame = false
+            optimalStateStartTime = nil
         }
         
         private func yaw(from transform: simd_float4x4) -> Float {
@@ -880,41 +911,30 @@ struct ARViewContainer: UIViewRepresentable {
             isCoolingDown = true
             
             let progress = viewModel.panoProgress
-            
-            // Determine if orientation is "perfect" (within new loosened thresholds)
             let roll = viewModel.panoRoll
             let pitch = viewModel.panoPitch
             let yaw = viewModel.panoYaw
-            
-            // New ultra-loosened perfection check: R:15, P:35, Y:35
             let isPerfect = abs(roll + 90) <= 15 && abs(pitch) <= 35 && abs(yaw) <= 35
             
-            // Check distance range: 15cm - 100cm
+            // STRICT REQUIREMENT: Only capture if distance is Optimal
             let isDistanceOptimal = viewModel.distanceState == .optimal
             
             if !isPerfect || !isDistanceOptimal {
-                // If we already have a good frame nearby, don't show a skeleton
                 let hasGoodNearby = viewModel.panoSnapshots.last { $0.image != nil && abs($0.progress - progress) < 0.03 } != nil
-                
                 if hasGoodNearby {
-                    // Skip skeleton, we already have a good one here
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
-                        self.isCoolingDown = false
-                    }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { self.isCoolingDown = false }
                     return
                 }
                 
-                // DON'T SNAP, show missing skeleton instead
                 DispatchQueue.main.async {
                     self.viewModel.panoSnapshots.append(PanoSnapshot(image: nil, progress: progress))
                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                 }
-                // Still cool down to maintain the interval
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
-                    self.isCoolingDown = false
-                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) { self.isCoolingDown = false }
                 return
             }
+            
+            self.viewModel.log("!!! CAPTURING FRAME at \(String(format: "%.2f", progress * 100))% | Dist: \(String(format: "%.2f", self.distanceToShelf))m")
             
             DispatchQueue.main.async {
                 self.viewModel.incrementCapturedCount()
@@ -931,8 +951,6 @@ struct ARViewContainer: UIViewRepresentable {
                 }
                 
                 let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-                
-                // Save a small thumbnail for the filmstrip
                 let thumbSize = CGSize(width: 60, height: 90)
                 UIGraphicsBeginImageContextWithOptions(thumbSize, false, 0.0)
                 uiImage.draw(in: CGRect(origin: .zero, size: thumbSize))
