@@ -330,7 +330,7 @@ async def upload_frame(
         frame_id = time.time_ns() // 1_000_000
     
     # 0.5 Save the frame image
-    image_path = image_storage.save_image(user_id, str(frame_id), content)
+    image_path = image_storage.save_image(user_id, f"{session_id}_{frame_id}", content)
     
     # 1. Process the image using Gemini to extract raw books
     result = await process_image_bytes(image_bytes=content, vertexai=True, project=project_id)
