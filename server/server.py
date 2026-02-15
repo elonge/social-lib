@@ -93,7 +93,7 @@ get_config_value("GOOGLE_API_KEY", "google-api-key")
 app = FastAPI(title="Book spine extractor API")
 
 # Initialize session store
-session_store = get_session_store("memory" if os.getenv("GOOGLE_API_KEY") else "redis")
+session_store = get_session_store("memory")
 
 # Initialize image storage
 image_storage = get_image_storage("file" if os.getenv("GOOGLE_API_KEY") else "gcs")
@@ -150,8 +150,6 @@ security = HTTPBearer()
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if test_user:
         return {"uid": test_user}
-
-    print("ZRZRZR", test_user)
 
     token = credentials.credentials
     try:
