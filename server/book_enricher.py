@@ -158,6 +158,8 @@ class BookEnricher:
             combined["author"] = ol_data.get("author") or gb_data.get("author")
             combined["language"] = ol_data.get("language") or gb_data.get("language")
             combined["isbn"] = ol_data.get("isbn") or gb_data.get("isbn")
+            combined["description"] = ol_data.get("description") or gb_data.get("description")
+            combined["subjects"] = ol_data.get("subjects") or gb_data.get("subjects")
             combined["cover_link"] = ol_data.get("cover_link") or gb_data.get("cover_link")
         if combined.get("cover_link"):
             combined["cover_link"] = self._normalize_cover_link(combined.get("cover_link"))
@@ -204,7 +206,7 @@ class BookEnricher:
                         "publisher": volume_info.get("publisher"),
                         "year": volume_info.get("publishedDate", "")[:4],
                         "language": volume_info.get("language"),
-                        "description": volume_info.get("description"),
+                        "subjects": volume_info.get("categories", []),
                         "isbn": isbn,
                         "cover_link": self._normalize_cover_link(volume_info.get("imageLinks", {}).get("thumbnail"))
                     }
@@ -245,6 +247,7 @@ class BookEnricher:
                         "year": str(doc.get("first_publish_year", "")),
                         "language": ", ".join(doc.get("language", [])[:1]),
                         "isbn": isbn,
+                        "subjects": doc.get("subject", []),
                         "cover_link": f"https://covers.openlibrary.org/b/id/{doc.get('cover_i')}-L.jpg" if doc.get("cover_i") else None
                     }
         except Exception as e:

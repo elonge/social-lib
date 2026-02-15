@@ -64,6 +64,8 @@ def default_to_dict(obj: Any) -> Dict[str, Any]:
             
             # Build dict excluding CopyOfKey fields and private fields
             for k, v in obj.__dict__.items():
+                if not v:
+                    continue
                 if not k.startswith("_") and k not in copy_of_key_fields:
                     result[k] = v
             return result

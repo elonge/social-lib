@@ -10,7 +10,7 @@ import cv2
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from google import genai
 from PIL import Image
 import time
@@ -123,6 +123,10 @@ Return the books in the order they appear from left to right (for vertically sta
 
 Only return the table, no other text. Do not include markdown code blocks."""
 
+## If we want to get geometric information in the image, add this before "Return the information..."
+## Also find for each book the middle point of its spine, and the angle at which it is standing or lying (0 being vertical), and the width and height of the book in pixels. Call these pos, angle, width.
+## pos | angle | width | height | 
+
         # Generate response
         print("    Running inference...")
         start_time = time.time()
@@ -170,7 +174,11 @@ Only return the table, no other text. Do not include markdown code blocks."""
                         "author": parts[1] if parts[1].lower() != "null" else None,
                         "publisher": parts[2] if parts[2].lower() != "null" else None,
                         "year": parts[3] if parts[3].lower() != "null" else None,
-                        "other_text": parts[4] if parts[4].lower() != "null" else None
+                        "other_text": parts[4] if parts[4].lower() != "null" else None,
+                        ## "pos": _to_pos(parts[5]) if parts[5].lower() != "null" else None,
+                        ## "angle": int(parts[6]) if parts[6].lower() != "null" else None,
+                        ## "width": int(parts[7]) if parts[7].lower() != "null" else None,
+                        ## "height": int(parts[8]) if parts[8].lower() != "null" else None
                     }
                     books.append(book)
                 
@@ -198,6 +206,12 @@ Only return the table, no other text. Do not include markdown code blocks."""
         
         return result
 
+def _to_pos(pos: str) -> Optional[Tuple[int, int]]:
+    if pos is None:
+        return None
+    
+    pos = pos.replace('(', '').replace(')', '').split(',')
+    return int(pos[0]), int(pos[1])
 
 async def process_video(
     video_path: str,
