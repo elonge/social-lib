@@ -25,8 +25,8 @@ from google.cloud import secretmanager
 load_dotenv()
 
 # Set these env vars for local development
-os.environ["GOOGLE_CLOUD_PROJECT"]='social-lib-487109'
-os.environ["TEST_USER"]='test_user'
+# os.environ["GOOGLE_CLOUD_PROJECT"]='social-lib-487109'
+#os.environ["TEST_USER"]='test_user'
 
 project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
 

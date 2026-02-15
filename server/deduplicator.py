@@ -17,7 +17,12 @@ class BookDeduplicator:
         recent_entries = {}
         
         for book in books:
-            isbn = book.get("isbn") or f"ta:{book.get("title")}|{book.get("author")}".lower().strip()
+            isbn = book.get("isbn")
+            if not isbn:
+                title = book.get("title", "").lower().strip()
+                author = book.get("author", "").lower().strip()
+                isbn = f"ta:{title}|{author}"
+
             count = book.get("count", 1)
             frame_id = book.get("frame_id")
             
