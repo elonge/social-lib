@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth
+from db_model import FrameUploadKey, FrameUploadEntry, LibraryBookKey, LibraryBook, ShelfFrameMetadataKey, ShelfFrameMetadata, LibraryKey, Library, Shelf, ShelfKey
 
 from book_extractor import process_image_bytes
 from book_enricher import BookEnricher
@@ -19,14 +20,58 @@ from session_manager import get_session_store
 from image_storage import get_image_storage
 from document_store import MongoDocumentStore, InMemoryDocumentStore, PartitionKey, SortKey, default_to_dict as to_dict
 from pymongo import MongoClient
+from google.cloud import secretmanager
 
 load_dotenv()
 
+project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+
+def get_config_value(env_var_name: str, secret_name: str) -> Optional[str]:
+    """
+    Get configuration value from environment variable or GCP Secret Manager.
+    If fetched from Secret Manager, caches the value in the environment variable.
+    
+    Args:
+        env_var_name: Name of the environment variable to check first
+        secret_name: Name of the secret in GCP Secret Manager
+        project_id: GCP project ID (defaults to GOOGLE_CLOUD_PROJECT env var)
+    
+    Returns:
+        The configuration value or None if not found
+    """
+    # First, try to get from environment variable
+    value = os.getenv(env_var_name)
+    if value:
+        return value
+    
+    # Fall back to GCP Secret Manager
+    try:
+        if not project_id:
+            print(f"Warning: Cannot fetch secret '{secret_name}' - no project_id provided and GOOGLE_CLOUD_PROJECT not set")
+            return None
+
+        client = secretmanager.SecretManagerServiceClient()
+        secret_path = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+        response = client.access_secret_version(request={"name": secret_path})
+        value = response.payload.data.decode("UTF-8")
+        
+        # Cache the value in environment variable for future calls
+        os.environ[env_var_name] = value
+        
+        print("Using secret manager for ", secret_name)
+        
+        return value
+    except Exception as e:
+        print(f"Warning: Failed to fetch secret '{secret_name}' from GCP Secret Manager: {e}")
+        return None
+
+test_user = os.environ.get("TEST_USER")
+
 # Initialize Firebase Admin
-if not firebase_admin._apps:
+if not firebase_admin._apps and not test_user:
     try:
         # 1. Try to load from FIREBASE_SERVICE_ACCOUNT_JSON env var (for Cloud Run)
-        service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+        service_account_json = get_config_value("FIREBASE_SERVICE_ACCOUNT_JSON", "firebase-service-account")
         if service_account_json:
             import json
             cert = json.loads(service_account_json)
@@ -42,48 +87,8 @@ if not firebase_admin._apps:
         print(f"Warning: Firebase Admin initialization failed: {e}")
         print("Auth verification may fail if credentials are not set.")
 
-@dataclass(frozen=True)
-class RawLibraryKey:
-    user_id: Annotated[str, PartitionKey]
-    frame_id: Annotated[int, SortKey]
-
-@dataclass
-class RawLibraryEntry:
-    user_id: str
-    frame_id: int
-    library: Optional[str] = None
-    shelf: Optional[str] = None
-    books: List[Dict[str, Any]] = field(default_factory=list)
-
-@dataclass(frozen=True)
-class LibraryBookKey:
-    user_id: Annotated[str, PartitionKey(order=1)]
-    library: Annotated[str, PartitionKey(order=2)]
-    shelf: Annotated[str, SortKey(order=1)]
-    book_id: Annotated[str, SortKey(order=2)] # ISBN or title|author
-
-@dataclass
-class LibraryBook:
-    # Add CopyOfKey mechanism
-    key: LibraryBookKey
-    title: str
-    author: Optional[str] = None
-    isbn: Optional[str] = None
-    frame_ids: List[int] = field(default_factory=list)
-
-@dataclass(frozen=True)
-class ShelfFrameMetadataKey:
-    user_id: Annotated[str, PartitionKey]
-    frame_id: Annotated[int, SortKey]
-
-@dataclass
-class ShelfFrameMetadata:
-    user_id: str
-    frame_id: int
-    library: Optional[str]
-    shelf: Optional[str]
-    book_count: int
-    uploaded_at: float
+# Get the API key for gemini
+get_config_value("GOOGLE_API_KEY", "google-api-key")
 
 app = FastAPI(title="Book spine extractor API")
 
@@ -91,39 +96,45 @@ app = FastAPI(title="Book spine extractor API")
 session_store = get_session_store("memory")
 
 # Initialize image storage
-image_storage = get_image_storage("file")
+image_storage = get_image_storage("file" if os.getenv("GOOGLE_API_KEY") else "gcs")
 
 # Initialize document stores
 # Use environment variables if available
-mongo_conn = os.environ.get("MONGODB_CONNECTION") or "mongodb://localhost:27017/"
+mongo_conn = get_config_value("MONGODB_CONNECTION", "mongodb-connection")
 mongo_client = MongoClient(mongo_conn)
 
-raw_library_store = MongoDocumentStore[RawLibraryKey, RawLibraryEntry](
+user_uploads_store = MongoDocumentStore[FrameUploadKey, FrameUploadEntry](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="user_raw_library",
-    data_type=RawLibraryEntry
+    collection_name="user_uploads",
+    key_type=FrameUploadKey,
+    data_type=FrameUploadEntry
 )
 
-user_library_store = MongoDocumentStore[LibraryBookKey, LibraryBook](
+user_books_store = MongoDocumentStore[LibraryBookKey, LibraryBook](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="user_library",
+    collection_name="user_books",
     key_type=LibraryBookKey,
     data_type=LibraryBook
 )
 
-shelf_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
+user_shelf_frame_metadata_store = MongoDocumentStore[ShelfFrameMetadataKey, ShelfFrameMetadata](
     client=mongo_client,
     database_name="social_lib",
-    collection_name="shelf_metadata",
+    collection_name="user_shelf_frame_metadata",
     key_type=ShelfFrameMetadataKey,
     data_type=ShelfFrameMetadata
 )
 
-raw_library_store.create_table()
+user_library_store = MongoDocumentStore[LibraryKey, Library](client=mongo_client, database_name="social_lib", collection_name="user_library", key_type=LibraryKey, data_type=Library)
+user_shelf_store = MongoDocumentStore[ShelfKey, Shelf](client=mongo_client, database_name="social_lib", collection_name="user_shelf", key_type=ShelfKey, data_type=Shelf)
+
+user_uploads_store.create_table()
 user_library_store.create_table()
-shelf_metadata_store.create_table()
+user_shelf_frame_metadata_store.create_table()
+user_library_store.create_table()
+user_shelf_store.create_table()
 
 # Add CORS middleware
 app.add_middleware(
@@ -137,6 +148,9 @@ app.add_middleware(
 security = HTTPBearer()
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if test_user:
+        return {"uid": test_user}
+
     token = credentials.credentials
     try:
         # Verify the Firebase token
@@ -165,7 +179,6 @@ class User:
     created_at: float = field(default_factory=time.time)
 
 # Initialize user store
-# Initialize user store
 # Fallback to InMemoryDocumentStore if Mongo is not available or for simpler dev setup
 # To use Mongo: Ensure MongoDB is running and MONGO_CONNECTION_STRING is set
 user_store = InMemoryDocumentStore[UserKey, User](
@@ -179,8 +192,6 @@ user_store.create_table()
 class CompleteUploadRequest(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
     session_id: Optional[str] = None
-    enrich: Optional[bool] = False
-    metadata: Dict[str, Any] = {}
     metadata: Dict[str, Any] = {}
 
 class UserResponse(BaseModel):
@@ -262,30 +273,52 @@ async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_user)
 
 @app.get("/init_upload")
 @app.post("/init_upload")
-async def init_upload(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def init_upload(current_user: Dict[str, Any] = Depends(get_current_user), library: Optional[str] = "My Library"):
+    """ 
+    First find the library or create a new one
+    """
+    libraries = user_library_store.get_range(LibraryKey(current_user["uid"], ""), LibraryKey(current_user["uid"], "\uffff"))
+    library_id = None
+    for lib in libraries:
+        if lib[1].name == library:
+            library_id = lib[0].library_id
+            break
+    if not library_id:
+        id = ""
+        if library == "My Library":
+            id = "my_library"
+        else:
+            id = str(uuid.uuid4())
+        key = LibraryKey(current_user["uid"], id)
+        user_library_store.put(key, Library(key=key, name=library, created_at=time.time()))
+        library_id = id
+
     """
     Initializes a new upload session.
     """
     session_id = str(uuid.uuid4())
-    session_store.create_session(session_id, {}, ttl_seconds=3600)
-    return {"status": "success", "session_id": session_id}
+    session_store.create_session(session_id, {"library_id": library_id}, ttl_seconds=3600)
+    return {"status": "success", "session_id": session_id, "library_id": library_id}
 
 @app.post("/upload_frame")
 async def upload_frame(
     file: UploadFile = File(...), 
     session_id: Optional[str] = Form(None), 
     frame_id: Optional[int] = Form(None),
-    name: Optional[str] = Form(None),
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    library: Optional[str] = Form(None),
-    shelf: Optional[str] = Form(None)
+    library_id: Optional[str] = Form(None),
+    shelf: Optional[str] = Form(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Receives an image file, extracts books, enriches them, and returns them with a count.
     Saves results to session using books_<frame_id> if session_id is provided.
-    Saves raw library entry to MongoDB.
+    Saves upload entry to MongoDB.
     """
     user_id = current_user["uid"]
+
+    session = session_store.get_session(session_id)
+    if session:
+        library_id = session["library_id"]
 
     # Read image bytes
     content = await file.read()
@@ -295,33 +328,31 @@ async def upload_frame(
         frame_id = time.time_ns() // 1_000_000
     
     # 0.5 Save the frame image
-    image_path = image_storage.save_image(user_id, str(frame_id), content)
+    image_path = image_storage.save_image(user_id, f"{session_id}_{frame_id}", content)
     
     # 1. Process the image using Gemini to extract raw books
-    result = await process_image_bytes(image_bytes=content)
+    result = await process_image_bytes(image_bytes=content, vertexai=True, project=project_id)
     raw_books = result.get("books", [])
-    
+
     # 2. Immediately enrich and deduplicate (counting mode)
     if raw_books:
         enricher = BookEnricher()
         enriched_books, stats = await enricher.batch_enrich(raw_books, dedupe_mode="counting")
         
         # 2.5 Save to raw library document store
-        entry_key = RawLibraryKey(user_id=user_id, frame_id=frame_id)
-        entry = RawLibraryEntry(user_id=user_id, frame_id=frame_id, library=library, shelf=shelf, books=enriched_books)
-        raw_library_store.put(entry_key, entry)
+        entry_key = FrameUploadKey(user_id, session_id, frame_id)
+        entry = FrameUploadEntry(entry_key, shelf, library_id, enriched_books)
+        user_uploads_store.put(entry_key, entry)
         
         # 2.6 Save shelf frame metadata
-        meta_key = ShelfFrameMetadataKey(user_id=user_id, frame_id=frame_id)
+        meta_key = ShelfFrameMetadataKey(user_id, library_id, frame_id)
         metadata = ShelfFrameMetadata(
-            user_id=user_id,
-            frame_id=frame_id,
-            library=library,
-            shelf=name,
+            key=meta_key,
+            shelf=shelf,
             book_count=len(enriched_books),
             uploaded_at=time.time()
         )
-        shelf_metadata_store.put(meta_key, metadata)
+        user_shelf_frame_metadata_store.put(meta_key, metadata)
 
         response_data = {
             "status": "success",
@@ -330,11 +361,11 @@ async def upload_frame(
             "usage": result.get("usage"),
             "image_path": image_path,
             "frame_id": frame_id,
-            "name": name
+            "shelf": shelf
         }
         
         # 3. Save to session if session_id is provided
-        if session_id:
+        if session:
             print(f"Saving to session: {session_id}, frame_id: {frame_id}")
             session_store.put(session_id, f"books_{frame_id}", response_data)
             response_data["session_id"] = session_id
@@ -355,26 +386,40 @@ async def complete_upload(
     """
     results = request.results
     user_id = current_user["uid"]
-    
+
     # If results are not provided, try to fetch from session
     if not results and request.session_id:
         full_session = session_store.get_session(request.session_id)
-        if not full_session:
-            return {"status": "error", "message": "Session not found"}
+        if full_session:        
+            library_id = full_session.get("library_id")
+            
+            # Aggregate all frame results (keys starting with books_)
+            # Sort keys numerically based on the frame_id suffix
+            frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
+            
+            def get_frame_num(k):
+                try:
+                    return int(k.split("_")[1])
+                except (IndexError, ValueError):
+                    return 0
+            
+            frame_keys.sort(key=get_frame_num)
+            results = [full_session[k] for k in frame_keys]
         
-        # Aggregate all frame results (keys starting with books_)
-        # Sort keys numerically based on the frame_id suffix
-        frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
-        
-        def get_frame_num(k):
-            try:
-                return int(k.split("_")[1])
-            except (IndexError, ValueError):
-                return 0
-                
-        frame_keys.sort(key=get_frame_num)
-        results = [full_session[k] for k in frame_keys]
-        
+        # Reconstruct library from uploads table
+        else:
+            frames = user_uploads_store.get_range(
+                FrameUploadKey(user_id, request.session_id, 0),
+                FrameUploadKey(user_id, request.session_id, time.time_ns() // 1_000_000)
+            )
+            results = []
+            if frames and len(frames) > 0:
+                library_id = frames[0][1].library_id
+                for frame in frames:
+                    f = frame[1]
+                    f.frame_id = frame[0].frame_id
+                    results.append(to_dict(f))
+
         if not results:
             return {"status": "error", "message": "Session empty (no frames found)"}
             
@@ -392,9 +437,12 @@ async def complete_upload(
             book_copy["frame_id"] = frame_id
             all_books_to_dedupe.append(book_copy)
 
-    frame_to_shelf = {res.get("frame_id"): (res.get("library"), res.get("shelf")) for res in results}
+    frame_to_shelf = {res.get("frame_id"): res.get("shelf") for res in results}
 
     deduped_books = BookDeduplicator.deduplicate_proximity(all_books_to_dedupe)
+    for book in deduped_books:
+        shelves = list({frame_to_shelf.get(frame_id) for frame_id in book["frame_ids"]})
+        book["shelves"] = shelves
 
     deduped_count = len(all_books_to_dedupe) - len(deduped_books)
 
@@ -414,29 +462,29 @@ async def complete_upload(
             
         shelves_for_book = set()
         for fid in book_frame_ids:
-            s_name = frame_to_shelf.get(fid)
-            if s_name:
-                shelves_for_book.add(s_name)
+            shelf = frame_to_shelf.get(fid)
+            if shelf:
+                shelves_for_book.add(shelf)
         
         if not shelves_for_book:
             unshelved_books.append(book)
         else:
-            for s_name in shelves_for_book:
-                if s_name not in books_by_shelf:
-                    books_by_shelf[s_name] = []
-                books_by_shelf[s_name].append(book)
+            for shelf in shelves_for_book:
+                if shelf not in books_by_shelf:
+                    books_by_shelf[shelf] = []
+                books_by_shelf[shelf].append(book)
 
     # For each affected shelf: Delete old content and Insert new
-    for s_name, shelf_books in books_by_shelf.items():
+    for shelf, shelf_books in books_by_shelf.items():
         # Delete range for (user_id, library, shelf)
         # We need a way to specify partial sort key for range delete?
         # DocumentStore.delete_range(start, end)
         # start = (user_id, library, shelf, "")
         # end = (user_id, library, shelf, "\uffff")
         
-        del_start = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id="")
-        del_end = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id="\uffff")
-        user_library_store.delete_range(del_start, del_end)
+        del_start = LibraryBookKey(user_id, library_id, shelf, "")
+        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
+        user_books_store.delete_range(del_start, del_end)
         
         # Insert new books
         for book in shelf_books:
@@ -446,25 +494,23 @@ async def complete_upload(
                 author = book.get("author", "").lower().strip()
                 book_id = f"{title}|{author}"
             
-            lib_key = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id=book_id)
+            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
             lib_book = LibraryBook(
-                user_id=user_id,
-                library=s_name[0],
-                shelf=s_name[1],
-                book_id=book_id,
+                key=lib_key,
                 title=book.get("title", "Unknown"),
                 author=book.get("author"),
                 isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", [])
+                frame_ids=book.get("frame_ids", []),
+                copies=book.get("count")
             )
-            user_library_store.put(lib_key, lib_book)
+            user_books_store.put(lib_key, lib_book)
             
     if unshelved_books:
-        s_name = "Unshelved" 
+        shelf = "Unshelved" 
         
-        del_start = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id="")
-        del_end = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id="\uffff")
-        user_library_store.delete_range(del_start, del_end)
+        del_start = LibraryBookKey(user_id, library_id, shelf, "")
+        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
+        user_books_store.delete_range(del_start, del_end)
 
         for book in unshelved_books:
             book_id = book.get("isbn")
@@ -473,18 +519,16 @@ async def complete_upload(
                 author = book.get("author", "").lower().strip()
                 book_id = f"{title}|{author}"
 
-            lib_key = LibraryBookKey(user_id=user_id, library=s_name[0], shelf=s_name[1], book_id=book_id)
+            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
             lib_book = LibraryBook(
-                user_id=user_id,
-                library=s_name[0],
-                shelf=s_name[1],
-                book_id=book_id,
+                key=lib_key,
                 title=book.get("title", "Unknown"),
                 author=book.get("author"),
                 isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", [])
+                frame_ids=book.get("frame_ids", []),
+                copies=book.get("count")
             )
-            user_library_store.put(lib_key, lib_book)
+            user_books_store.put(lib_key, lib_book)
 
     # 4. Cleanup session if it was used
     if request.session_id:
@@ -506,7 +550,7 @@ async def enrich_book(book: Dict[str, Any]):
     Receives a single book's metadata and returns enriched metadata and diagnostics.
     """
     enricher = BookEnricher()
-    enriched, diagnostics = enricher.enrich_book(book)
+    enriched, diagnostics = await enricher.enrich_book(book)
     return {
         "book": enriched,
         "diagnostics": diagnostics
@@ -518,36 +562,49 @@ async def enrich_books(books: List[Dict[str, Any]]):
     Receives a list of book metadata and returns enriched results and batch diagnostics.
     """
     enricher = BookEnricher()
-    enriched, stats = enricher.batch_enrich(books)
+    enriched, stats = await enricher.batch_enrich(books)
     return {
         "books": enriched,
         "batch_stats": stats
     }
 
-@app.get("/user_library")
-async def get_user_library(current_user: Dict[str, Any] = Depends(get_current_user), library: Optional[str] = None):
+
+@app.get("/user_libraries")
+async def get_user_libraries(current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Returns the user's libraries organized by library and shelf.
     """
     user_id = current_user["uid"]
     # 1. Fetch all shelf metadata for user
-    # Range query from (user_id, 0) to (user_id, max_int)
-    # We use tuples directly since DocumentStore supports it
-    # Fetch all books for user
-    # Range query from (user_id, "", "") to (user_id, "\uffff", "\uffff")
-    # Because sort key is now (libarary, shelf, book_id)
-    from_library = library if library else ""
-    to_library = library if library else "\uffff"
-    b_start = LibraryBookKey(user_id=user_id, library=from_library, shelf="", book_id="")
-    b_end = LibraryBookKey(user_id=user_id, library=to_library, shelf="\uffff", book_id="\uffff")
+    lib_rows = user_library_store.get_range(LibraryKey(user_id, ""), LibraryKey(user_id, "\uffff"))
     
-    book_rows = user_library_store.get_range(b_start, b_end)
+    # 2. Group books by library_id
+    libraries = {}
+    for _, lib in lib_rows:
+        libraries[lib.key.library_id] = {
+            "name": lib.name,
+        }
+    return libraries
+
+@app.get("/user_library")
+async def get_user_library(current_user: Dict[str, Any] = Depends(get_current_user), library_id: Optional[str] = None):
+    """
+    Returns the user's libraries organized by library and shelf.
+    """
+    user_id = current_user["uid"]
+    # 1. Fetch all shelf metadata for user
+    from_library = library_id if library_id else ""
+    to_library = library_id if library_id else "\uffff"
+    b_start = LibraryBookKey(user_id, from_library, "", "")
+    b_end = LibraryBookKey(user_id, to_library, "\uffff", "\uffff")
+    
+    book_rows = user_books_store.get_range(b_start, b_end)
     
     shelves: Dict[str, List[LibraryBook]] = {}
     unshelved: List[LibraryBook] = []
     
-    for _, book in book_rows:
-        s_name = book.library + ":" + book.shelf
+    for id, book in book_rows:
+        s_name = id.library_id + ":" + id.shelf
         if s_name == "Unshelved":
             unshelved.append(book)
         else:

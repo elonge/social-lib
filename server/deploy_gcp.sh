@@ -34,13 +34,6 @@ else
   load_env_file "${SERVER_DIR}/.env" || true
 fi
 
-if [[ -z "${GOOGLE_API_KEY:-}" ]]; then
-  echo "GOOGLE_API_KEY is required." >&2
-  echo "Example: GOOGLE_API_KEY=... ./server/deploy_gcp.sh" >&2
-  echo "Or set ENV_FILE to a .env file that contains GOOGLE_API_KEY." >&2
-  exit 1
-fi
-
 # Check for service-account.json
 SERVICE_ACCOUNT_FILE="${SERVER_DIR}/service-account.json"
 SERVICE_ACCOUNT_JSON=""
@@ -58,7 +51,7 @@ DEPLOY_CMD="gcloud run deploy ${SERVICE_NAME} \
   --source ${SERVER_DIR} \
   --region ${REGION} \
   --allow-unauthenticated \
-  --set-env-vars GOOGLE_API_KEY=${GOOGLE_API_KEY}"
+  --set-env-vars GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
 
 if [[ -n "${PROJECT_ID}" ]]; then
   DEPLOY_CMD="${DEPLOY_CMD} --project ${PROJECT_ID}"

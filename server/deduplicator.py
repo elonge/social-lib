@@ -57,7 +57,7 @@ class BookDeduplicator:
         if not books:
             return []
             
-        unique_books = {} 
+        unique_books = {}
         
         for book in books:
             isbn = book.get("isbn")

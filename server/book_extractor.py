@@ -20,7 +20,7 @@ from deduplicator import BookDeduplicator
 class GeminiBookExtractor:
     """Extract book information from images using Gemini Vision API."""
     
-    def __init__(self, api_key: str = None, model_name: str = "gemini-3-flash-preview", rescale: int = None, vertexai: bool = False, project: str = None, location: str = "us-central1"):
+    def __init__(self, api_key: str = None, model_name: str = "gemini-3-flash-preview", rescale: int = None, vertexai: bool = False, project: str = None, location: str = "global"):
         """
         Initialize the Gemini or Vertex AI client.
         
@@ -41,13 +41,8 @@ class GeminiBookExtractor:
         else:
             # Get API key from parameter or environment
             self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
-            if not self.api_key:
-                raise ValueError(
-                    "Google API key required. Set GOOGLE_API_KEY environment variable "
-                    "or pass api_key parameter."
-                )
             # Initialize client with Gemini AI Studio configuration
-            self.client = genai.Client(api_key=self.api_key)
+            self.client = genai.Client(api_key=self.api_key) if self.api_key else genai.Client()
             print("Initialized Gemini AI Studio client")
         
         # Initialize model and rescale settings
@@ -114,6 +109,8 @@ Header: title | author | publisher | year | other_text
 
 If a field is not visible, use "null".
 If you see a book but cannot read it, include it with "null" values.
+
+If you see a book only partially - do not analyze it.
 
 Return the books in the order they appear from left to right (for vertically stacked books), and top to bottom (for horiozontally stacked books)
 
@@ -383,7 +380,7 @@ async def process_image_bytes(
     rescale: int = None,
     vertexai: bool = False,
     project: str = None,
-    location: str = "us-central1"
+    location: str = "global"
 ):
     """
     Process image bytes and extract book information.

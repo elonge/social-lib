@@ -13,3 +13,4 @@ requests
 redis
 google-cloud-storage
 pymongo
+google-cloud-secret-manager

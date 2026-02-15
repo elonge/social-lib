@@ -22,11 +22,10 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## Deploy to GCP (Cloud Run)
 
-Use the provided script in `server/deploy_gcp.sh`. It deploys the API to Cloud Run and sets `GOOGLE_API_KEY`.
+Use the provided script in `server/deploy_gcp.sh`. It deploys the API to Cloud Run.
 
 Prereqs:
 - `gcloud` installed and authenticated
-- `GOOGLE_API_KEY` available in an env file or exported in your shell
 
 Run from repo root:
 
