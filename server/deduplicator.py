@@ -17,11 +17,11 @@ class BookDeduplicator:
         recent_entries = {}
         
         for book in books:
-            isbn = book.get("isbn")
+            isbn = book.get("isbn") or f"ta:{book.get("title")}|{book.get("author")}".lower().strip()
             count = book.get("count", 1)
             frame_id = book.get("frame_id")
             
-            key = (isbn, count) if isbn else None
+            key = (isbn, count)
             is_dupe = False
             
             if key and key in recent_entries:
@@ -66,7 +66,7 @@ class BookDeduplicator:
             else:
                 title = book.get("title", "").lower().strip()
                 author = book.get("author", "").lower().strip()
-                key = f"ta:{title}|{author}"
+                key = f"ta:{title}|{author}".lower().strip()
             
             if key in unique_books:
                 unique_books[key]["count"] = unique_books[key].get("count", 1) + 1

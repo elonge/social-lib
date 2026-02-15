@@ -305,7 +305,6 @@ export default function Home() {
                 <div>Google Books: {finalResult.stats.google_books_hits}</div>
                 <div>OpenLibrary: {finalResult.stats.open_library_hits}</div>
                 <div>Gemini calls: {finalResult.stats.gemini_calls}</div>
-                <div>Duration: {finalResult.stats.total_duration_seconds.toFixed(1)}s</div>
               </div>
             )}
             <div className="overflow-x-auto">
