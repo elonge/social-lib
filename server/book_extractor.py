@@ -125,9 +125,8 @@ Only return the table, no other text. Do not include markdown code blocks."""
                 contents=[prompt, image],
                 config={
                     'temperature': 0.1,
-                    'max_output_tokens': 4000,
-                    'thinking_level': 'LOW'
-                }
+                    'max_output_tokens': 8000,
+                },
             )
             
             elapsed = time.time() - start_time
