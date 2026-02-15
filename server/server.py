@@ -24,7 +24,9 @@ from google.cloud import secretmanager
 
 load_dotenv()
 
-def get_config_value(env_var_name: str, secret_name: str, project_id: Optional[str] = None) -> Optional[str]:
+project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+
+def get_config_value(env_var_name: str, secret_name: str) -> Optional[str]:
     """
     Get configuration value from environment variable or GCP Secret Manager.
     If fetched from Secret Manager, caches the value in the environment variable.
@@ -44,9 +46,6 @@ def get_config_value(env_var_name: str, secret_name: str, project_id: Optional[s
     
     # Fall back to GCP Secret Manager
     try:
-        if not project_id:
-            project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-        
         if not project_id:
             print(f"Warning: Cannot fetch secret '{secret_name}' - no project_id provided and GOOGLE_CLOUD_PROJECT not set")
             return None
@@ -334,7 +333,7 @@ async def upload_frame(
     image_path = image_storage.save_image(user_id, str(frame_id), content)
     
     # 1. Process the image using Gemini to extract raw books
-    result = await process_image_bytes(image_bytes=content)
+    result = await process_image_bytes(image_bytes=content, vertexai=True, project=project_id)
     raw_books = result.get("books", [])
 
     # 2. Immediately enrich and deduplicate (counting mode)

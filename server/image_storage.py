@@ -45,7 +45,7 @@ class GCSShelfImageStorage(ShelfImageStorage):
     def save_image(self, user_id: str, frame_id: str, image_bytes: bytes) -> str:
         if not self.bucket:
             raise RuntimeError("GCS Storage not initialized (missing dependencies or bucket)")
-            
+
         blob_path = f"{user_id}/{frame_id}.jpg"
         blob = self.bucket.blob(blob_path)
         blob.upload_from_string(image_bytes, content_type="image/jpeg")
@@ -53,6 +53,7 @@ class GCSShelfImageStorage(ShelfImageStorage):
         return f"gs://{self.bucket_name}/{blob_path}"
 
 def get_image_storage(storage_type: str = "file", **kwargs) -> ShelfImageStorage:
+    print("Storage type: ", storage_type)
     if storage_type == "file":
         return FileShelfImageStorage(**kwargs)
     elif storage_type == "gcs":
