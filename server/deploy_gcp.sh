@@ -58,7 +58,7 @@ DEPLOY_CMD="gcloud run deploy ${SERVICE_NAME} \
   --source ${SERVER_DIR} \
   --region ${REGION} \
   --allow-unauthenticated \
-  --set-env-vars GOOGLE_API_KEY=${GOOGLE_API_KEY}"
+  --set-env-vars GOOGLE_CLOUD_PROJECT=${PROJECT_ID}"
 
 if [[ -n "${PROJECT_ID}" ]]; then
   DEPLOY_CMD="${DEPLOY_CMD} --project ${PROJECT_ID}"
