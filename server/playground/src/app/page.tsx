@@ -131,11 +131,11 @@ export default function Home() {
       console.log('Completing upload with frames:', selectedFrames.map(f => f.id));
       const data = await apiRequest('/complete_upload', {
         method: 'POST',
+        headers: {'Content-Type': 'application/json; charset=UTF-8'},
         body: JSON.stringify({
-          results: selectedFrames.map(f => f.rawResult),
           session_id: session,
           // user_id removed
-        }),
+        })
       });
 
       console.log('Complete upload response:', data);
