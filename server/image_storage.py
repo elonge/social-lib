@@ -56,7 +56,7 @@ def get_image_storage(storage_type: str = "file", **kwargs) -> ShelfImageStorage
     if storage_type == "file":
         return FileShelfImageStorage(**kwargs)
     elif storage_type == "gcs":
-        bucket_name = kwargs.get("bucket_name") or os.environ.get("SHELF_IMAGES_BUCKET") or "shelf-images"
+        bucket_name = kwargs.get("bucket_name") or os.environ.get("SHELF_IMAGES_BUCKET") or "user-shelf-images"
         if not bucket_name:
             raise ValueError("bucket_name is required for GCS storage")
         return GCSShelfImageStorage(bucket_name)
