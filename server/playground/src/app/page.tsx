@@ -23,8 +23,8 @@ interface FrameResult {
 
 export default function Home() {
   const { user, logout } = useAuth();
+  const [session, setSession] = useState(null);
   const [frames, setFrames] = useState<FrameResult[]>([]);
-  const [enriching, setEnriching] = useState(false);
   const [finalResult, setFinalResult] = useState<{ books: Book[], stats?: any } | null>(null);
   const [viewingFrame, setViewingFrame] = useState<FrameResult | null>(null);
 
@@ -74,6 +74,7 @@ export default function Home() {
     } catch (error) {
         console.error('Error in init upload session:', error);
     }
+    setSession(session_id);
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -115,7 +116,7 @@ export default function Home() {
     event.target.value = '';
   };
 
-  const handleCompleteUpload = async (enrich: boolean = false) => {
+  const handleCompleteUpload = async () => {
     const selectedFrames = frames.filter(f => f.selected && f.status === 'complete');
     if (selectedFrames.length === 0) return;
 
@@ -124,17 +125,15 @@ export default function Home() {
       return;
     }
 
-    setEnriching(true);
     const { apiRequest } = await import('../lib/api');
 
     try {
-      console.log('Completing upload with frames:', selectedFrames.map(f => f.id), 'Enrich:', enrich);
+      console.log('Completing upload with frames:', selectedFrames.map(f => f.id));
       const data = await apiRequest('/complete_upload', {
         method: 'POST',
         body: JSON.stringify({
           results: selectedFrames.map(f => f.rawResult),
-          enrich: enrich,
-          session_id: session_id,
+          session_id: session,
           // user_id removed
         }),
       });
@@ -147,7 +146,6 @@ export default function Home() {
     } catch (error) {
       console.error('Error completing upload:', error);
     }
-    setEnriching(false);
   };
 
   const toggleFrameSelection = (id: string) => {
@@ -208,18 +206,11 @@ export default function Home() {
               <h2 className="text-xl font-semibold">Step 2: Review Frames ({selectedCount} selected)</h2>
               <div className="flex gap-2">
                 <button
-                  onClick={() => handleCompleteUpload(false)}
-                  disabled={enriching || selectedCount === 0 || isAnyProcessing}
+                  onClick={() => handleCompleteUpload()}
+                  disabled={selectedCount === 0 || isAnyProcessing}
                   className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 font-medium"
                 >
                   Merge & Deduplicate
-                </button>
-                <button
-                  onClick={() => handleCompleteUpload(true)}
-                  disabled={enriching || selectedCount === 0 || isAnyProcessing}
-                  className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 disabled:bg-gray-400 font-medium"
-                >
-                  {enriching ? 'Enriching...' : 'Merge & Enrich'}
                 </button>
               </div>
             </div>
