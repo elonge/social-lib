@@ -24,7 +24,7 @@ from google.cloud import secretmanager
 
 load_dotenv()
 
-# Uncomment for local development
+# Set these env vars for local development
 # os.environ["GOOGLE_CLOUD_PROJECT"]='social-lib-487109'
 # os.environ["TEST_USER"]='test_user'
 
@@ -196,6 +196,7 @@ user_store.create_table()
 class CompleteUploadRequest(BaseModel):
     results: Optional[List[Dict[str, Any]]] = None
     session_id: Optional[str] = None
+    shelf: Optional[str] = None
     metadata: Dict[str, Any] = {}
 
 class UserResponse(BaseModel):
@@ -392,41 +393,7 @@ async def complete_upload(
     user_id = current_user["uid"]
 
     # If results are not provided, try to fetch from session
-    if not results and request.session_id:
-        full_session = session_store.get_session(request.session_id)
-        if full_session:        
-            library_id = full_session.get("library_id")
-            
-            # Aggregate all frame results (keys starting with books_)
-            # Sort keys numerically based on the frame_id suffix
-            frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
-            
-            def get_frame_num(k):
-                try:
-                    return int(k.split("_")[1])
-                except (IndexError, ValueError):
-                    return 0
-            
-            frame_keys.sort(key=get_frame_num)
-            results = [full_session[k] for k in frame_keys]
-        
-        # Reconstruct library from uploads table
-        else:
-            frames = user_uploads_store.get_range(
-                FrameUploadKey(user_id, request.session_id, 0),
-                FrameUploadKey(user_id, request.session_id, time.time_ns() // 1_000_000)
-            )
-            results = []
-            if frames and len(frames) > 0:
-                library_id = frames[0][1].library_id
-                for frame in frames:
-                    f = frame[1]
-                    f.frame_id = frame[0].frame_id
-                    results.append(to_dict(f))
-
-        if not results:
-            return {"status": "error", "message": "Session empty (no frames found)"}
-            
+    (results, library_id) = _get_uploaded_frames(user_id, request.session_id, request.shelf, results)
     if not results:
         return {"status": "error", "message": "No results provided and no session found"}
         
@@ -479,62 +446,14 @@ async def complete_upload(
                 books_by_shelf[shelf].append(book)
 
     # For each affected shelf: Delete old content and Insert new
-    for shelf, shelf_books in books_by_shelf.items():
-        # Delete range for (user_id, library, shelf)
-        # We need a way to specify partial sort key for range delete?
-        # DocumentStore.delete_range(start, end)
-        # start = (user_id, library, shelf, "")
-        # end = (user_id, library, shelf, "\uffff")
-        
-        del_start = LibraryBookKey(user_id, library_id, shelf, "")
-        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
-        user_books_store.delete_range(del_start, del_end)
-        
-        # Insert new books
-        for book in shelf_books:
-            book_id = book.get("isbn")
-            if not book_id:
-                title = book.get("title", "").lower().strip()
-                author = book.get("author", "").lower().strip()
-                book_id = f"{title}|{author}"
-            
-            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
-            lib_book = LibraryBook(
-                key=lib_key,
-                title=book.get("title", "Unknown"),
-                author=book.get("author"),
-                isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", []),
-                copies=book.get("count")
-            )
-            user_books_store.put(lib_key, lib_book)
+    for shelf, shelf_books in books_by_shelf.items():        
+        _store_books_to_library(user_id, library_id, shelf, shelf_books)
             
     if unshelved_books:
         shelf = "Unshelved" 
-        
-        del_start = LibraryBookKey(user_id, library_id, shelf, "")
-        del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
-        user_books_store.delete_range(del_start, del_end)
+        _store_books_to_library(user_id, library_id, shelf, unshelved_books)
 
-        for book in unshelved_books:
-            book_id = book.get("isbn")
-            if not book_id:
-                title = book.get("title", "").lower().strip()
-                author = book.get("author", "").lower().strip()
-                book_id = f"{title}|{author}"
-
-            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
-            lib_book = LibraryBook(
-                key=lib_key,
-                title=book.get("title", "Unknown"),
-                author=book.get("author"),
-                isbn=book.get("isbn"),
-                frame_ids=book.get("frame_ids", []),
-                copies=book.get("count")
-            )
-            user_books_store.put(lib_key, lib_book)
-
-    # 4. Cleanup session if it was used
+    # Cleanup session if it was used
     if request.session_id:
         print(f"Deleting session: {request.session_id}")
         session_store.delete_session(request.session_id)
@@ -547,6 +466,78 @@ async def complete_upload(
             "proximity_deduped": deduped_count
         }
     }
+
+def _get_uploaded_frames(
+    user_id: str, session_id: Optional[str], shelf: Optional[str], results: Optional[List[Dict[str, Any]]]
+    ):
+    # If results are not provided, try to fetch from session
+    if not results and session_id:
+        full_session = session_store.get_session(session_id)
+        if full_session:        
+            library_id = full_session.get("library_id")
+            
+            # Aggregate all frame results (keys starting with books_)
+            # Sort keys numerically based on the frame_id suffix
+            frame_keys = [k for k in full_session.keys() if k.startswith("books_")]
+            
+            def get_frame_num(k):
+                try:
+                    return int(k.split("_")[1])
+                except (IndexError, ValueError):
+                    return 0
+            
+            frame_keys.sort(key=get_frame_num)
+            results = [full_session[k] for k in frame_keys if not shelf or full_session[k]["shelf"] == shelf]
+        
+        # Reconstruct library from uploads table
+        else:
+            frames = user_uploads_store.get_range(
+                FrameUploadKey(user_id, session_id, 0),
+                FrameUploadKey(user_id, session_id, time.time_ns() // 1_000_000)
+            )
+            results = []
+            if frames and len(frames) > 0:
+                library_id = frames[0][1].library_id
+                for frame in frames:
+                    f = frame[1]
+                    if not shelf or f.shelf == shelf:
+                        f.frame_id = frame[0].frame_id
+                        results.append(to_dict(f))
+
+    if not results:
+        return None
+
+    return results, library_id
+
+def _store_books_to_library(user_id: str, library_id: str, shelf: str, books: List[Dict[str, Any]]):
+    print(f"Saving book shelf: {shelf} with {len(books)} books")
+
+    # Delete range for (user_id, library, shelf)
+    # We need a way to specify partial sort key for range delete?
+    # DocumentStore.delete_range(start, end)
+    # start = (user_id, library, shelf, "")
+    # end = (user_id, library, shelf, "\uffff")
+    del_start = LibraryBookKey(user_id, library_id, shelf, "")
+    del_end = LibraryBookKey(user_id, library_id, shelf, "\uffff")
+    user_books_store.delete_range(del_start, del_end)
+
+    for book in books:
+        book_id = book.get("isbn")
+        if not book_id:
+            title = book.get("title", "").lower().strip()
+            author = book.get("author", "").lower().strip()
+            book_id = f"{title}|{author}"
+            
+            lib_key = LibraryBookKey(user_id, library_id, shelf, book_id)
+            lib_book = LibraryBook(
+                key=lib_key,
+                title=book.get("title", "Unknown"),
+                author=book.get("author"),
+                isbn=book.get("isbn"),
+                frame_ids=book.get("frame_ids", []),
+                copies=book.get("count")
+            )
+            user_books_store.put(lib_key, lib_book)
 
 @app.post("/enrich_book")
 async def enrich_book(book: Dict[str, Any]):
