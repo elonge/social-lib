@@ -1,6 +1,32 @@
 import SwiftUI
 import UIKit
 
+enum PanoDirection {
+    case left
+    case right
+    case unknown
+}
+
+enum PanoSpeedState {
+    case idle
+    case ok
+    case tooFast
+    case tooSlow
+}
+
+enum DistanceState {
+    case optimal
+    case tooClose
+    case tooFar
+    case unknown
+}
+
+struct PanoSnapshot: Identifiable {
+    let id = UUID()
+    let image: UIImage? // Optional to support missing skeletons
+    let progress: CGFloat
+}
+
 class SessionViewModel: ObservableObject {
     @Published var capturedCount = 0
     @Published var pendingUploads = 0
@@ -9,8 +35,50 @@ class SessionViewModel: ObservableObject {
     @Published var isRecording = false
     @Published var isFinalizing = false
     @Published var identifiedBooks: [Book] = []
+    @Published var panoProgress: CGFloat = 0
+    @Published var panoDirection: PanoDirection = .unknown
+    @Published var panoSpeed: PanoSpeedState = .idle
+    @Published var panoLevelOffset: CGFloat = 0
+    @Published var panoLevelBroken: Bool = false
+    @Published var panoRoll: CGFloat = 0
+    @Published var panoPitch: CGFloat = 0
+    @Published var panoYaw: CGFloat = 0
+    @Published var panoSnapshots: [PanoSnapshot] = []
+    @Published var distanceState: DistanceState = .unknown
+    @Published var isDebugEnabled = true
     
     private var sessionResults: [[String: Any]] = []
+    private let logFileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("pano_debug.log")
+    
+    init() {
+        clearLog()
+    }
+    
+    func log(_ message: String) {
+        guard isDebugEnabled else { return }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let logEntry = "[\(timestamp)] \(message)\n"
+        
+        if let data = logEntry.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFileURL.path) {
+                if let fileHandle = try? FileHandle(forWritingTo: logFileURL) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: logFileURL)
+            }
+        }
+    }
+    
+    func clearLog() {
+        try? FileManager.default.removeItem(at: logFileURL)
+    }
+    
+    func getLogURL() -> URL {
+        return logFileURL
+    }
     
     func startRecording() {
         print("🟢 UI: Starting session...")
@@ -19,12 +87,21 @@ class SessionViewModel: ObservableObject {
         sessionResults = []
         identifiedBooks = []
         isRecording = true
+        panoProgress = 0
+        panoDirection = .unknown
+        panoSpeed = .idle
+        panoLevelOffset = 0
+        panoLevelBroken = false
+        panoSnapshots = []
         statusMessage = "Scanning active"
     }
     
     func stopRecording() {
         print("🔴 UI: Stopping session. Frames snapped: \(capturedCount), Pending uploads: \(pendingUploads)")
         isRecording = false
+        panoSpeed = .idle
+        panoLevelOffset = 0
+        panoLevelBroken = false
         
         if pendingUploads > 0 {
             statusMessage = "Finishing uploads (\(pendingUploads) left)..."

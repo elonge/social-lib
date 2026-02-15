@@ -3,9 +3,22 @@ import UIKit
 
 class NetworkManager {
     static let shared = NetworkManager()
+    // Toggle to focus on UI without real network calls.
+    static var skipServerCalls = true
     private let baseURL = "https://book-extractor-api-522989910118.us-central1.run.app"
+    private let mockDelay: TimeInterval = 0.35
     
     func uploadFrame(image: UIImage, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        if NetworkManager.skipServerCalls {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + mockDelay) {
+                let mockPayload: [String: Any] = [
+                    "frame_id": UUID().uuidString,
+                    "status": "mocked"
+                ]
+                completion(.success(mockPayload))
+            }
+            return
+        }
         guard let url = URL(string: "\(baseURL)/upload_next_frame") else { return }
         guard let imageData = image.jpegData(compressionQuality: 0.8) else { return }
         
@@ -56,6 +69,13 @@ class NetworkManager {
     }
     
     func completeUpload(results: [[String: Any]], completion: @escaping (Result<[Book], Error>) -> Void) {
+        if NetworkManager.skipServerCalls {
+            let books = Self.mockBooks()
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + mockDelay) {
+                completion(.success(books))
+            }
+            return
+        }
         guard let url = URL(string: "\(baseURL)/complete_upload") else { return }
         print("🏁 Completing upload with \(results.count) frames...")
         
@@ -127,5 +147,15 @@ class NetworkManager {
                 completion(.failure(error))
             }
         }.resume()
+    }
+
+    private static func mockBooks() -> [Book] {
+        [
+            Book(title: "The Left Hand of Darkness", author: "Ursula K. Le Guin", publisher: "Ace", year: "1969", otherText: "Science fiction classic", coverLink: nil),
+            Book(title: "Invisible Cities", author: "Italo Calvino", publisher: "Harcourt", year: "1972", otherText: "Fiction", coverLink: nil),
+            Book(title: "The Design of Everyday Things", author: "Don Norman", publisher: "Basic Books", year: "2013", otherText: "Design", coverLink: nil),
+            Book(title: "Godel, Escher, Bach", author: "Douglas Hofstadter", publisher: "Basic Books", year: "1979", otherText: "Cognitive science", coverLink: nil),
+            Book(title: "Thinking, Fast and Slow", author: "Daniel Kahneman", publisher: "Farrar, Straus and Giroux", year: "2011", otherText: "Psychology", coverLink: nil)
+        ]
     }
 }
