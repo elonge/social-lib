@@ -552,7 +552,7 @@ async def enrich_book(book: Dict[str, Any]):
     Receives a single book's metadata and returns enriched metadata and diagnostics.
     """
     enricher = BookEnricher()
-    enriched, diagnostics = enricher.enrich_book(book)
+    enriched, diagnostics = await enricher.enrich_book(book)
     return {
         "book": enriched,
         "diagnostics": diagnostics
@@ -564,7 +564,7 @@ async def enrich_books(books: List[Dict[str, Any]]):
     Receives a list of book metadata and returns enriched results and batch diagnostics.
     """
     enricher = BookEnricher()
-    enriched, stats = enricher.batch_enrich(books)
+    enriched, stats = await enricher.batch_enrich(books)
     return {
         "books": enriched,
         "batch_stats": stats
