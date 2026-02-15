@@ -50,7 +50,7 @@ def get_config_value(env_var_name: str, secret_name: str, project_id: Optional[s
         if not project_id:
             print(f"Warning: Cannot fetch secret '{secret_name}' - no project_id provided and GOOGLE_CLOUD_PROJECT not set")
             return None
-        
+
         client = secretmanager.SecretManagerServiceClient()
         secret_path = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
         response = client.access_secret_version(request={"name": secret_path})
@@ -58,6 +58,8 @@ def get_config_value(env_var_name: str, secret_name: str, project_id: Optional[s
         
         # Cache the value in environment variable for future calls
         os.environ[env_var_name] = value
+        
+        print("Using secret manager for ", secret_name)
         
         return value
     except Exception as e:
